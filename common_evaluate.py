@@ -129,8 +129,8 @@ image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("git", "libgl1-mesa-glx", "libglib2.0-0")
     .pip_install(
-        "torch==2.3.0",
-        "torchvision==0.18.0",
+        "torch>=2.5.0",
+        "torchvision>=0.20.0",
         "ultralytics>=8.3.0",
         "roboflow>=1.1.33",
         "opencv-python-headless>=4.10.0.84",
@@ -142,8 +142,11 @@ image = (
         "thop>=0.1.1",
         "tabulate>=0.9.0",
         "pycocotools>=2.0.7",
-        "tqdm>=4.66.0"
+        "tqdm>=4.66.0",
+        "rfdetr[train,loggers]==1.10.1",
+        "supervision"
     )
+    .add_local_dir(os.path.join(CURRENT_DIR, "models"), remote_path="/models")
 )
 
 
@@ -659,10 +662,27 @@ class BenchmarkEngine:
     def measure_complexity(adapter: BaseModelAdapter, device: str = "cuda:0", imgsz: int = 640) -> Tuple[float, float]:
         import torch
         torch_model = adapter.get_torch_module()
-        torch_model.eval().to(device)
+        try:
+            if hasattr(torch_model, 'eval'):
+                torch_model.eval().to(device)
+            elif hasattr(torch_model, 'model') and hasattr(torch_model.model, 'eval'):
+                torch_model = torch_model.model
+                torch_model.eval().to(device)
+            else:
+                return 0.0, 0.0
+        except Exception:
+            return 0.0, 0.0
 
         gflops = 0.0
         params_m = 0.0
+        
+        def clear_hooks():
+            for m in torch_model.modules():
+                if hasattr(m, '_forward_hooks'):
+                    m._forward_hooks.clear()
+                if hasattr(m, '_forward_pre_hooks'):
+                    m._forward_pre_hooks.clear()
+
         try:
             from thop import profile
             dummy = torch.randn(1, 3, imgsz, imgsz).to(device)
@@ -672,7 +692,9 @@ class BenchmarkEngine:
                 flops, params = profile(torch_model, inputs=([dummy[0]],), verbose=False)
             gflops = round(flops / 1e9, 2)
             params_m = round(params / 1e6, 2)
+            clear_hooks()
         except Exception as e:
+            clear_hooks()
             params_count = sum(p.numel() for p in torch_model.parameters())
             params_m = round(params_count / 1e6, 2)
             gflops = 0.0
@@ -804,7 +826,11 @@ class COCOBenchmarkEvaluator:
 
         per_class_metrics = {}
         for idx_k, cat_id in enumerate(coco_eval.params.catIds):
-            cat_name = coco_gt.loadCats(cat_id)[0]["name"]
+            cats = coco_gt.loadCats([cat_id])
+            if not cats or cats[0] is None:
+                cat_name = f"Class_{cat_id}"
+            else:
+                cat_name = cats[0].get("name", f"Class_{cat_id}")
             p_all = coco_eval.eval["precision"][:, :, idx_k, 0, 2]
             v_all = p_all[p_all > -1]
             cls_map50_95 = float(np.mean(v_all)) if len(v_all) > 0 else 0.0
