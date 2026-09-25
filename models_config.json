@@ -23,6 +23,7 @@
   "benchmark_settings": {
     "imgsz": 640,
     "conf_threshold": 0.001,
+    "eval_conf_threshold": 0.25,
     "iou_threshold": 0.50,
     "max_detections": 100,
     "warmup_runs": 10,
@@ -45,7 +46,6 @@
       "model_type": "yolo",
       "weights": "/data/runs/10_09_2026_YOLO26X_640/best.pt",
       "local_weights": "Yolov26/10_09_2026/best.pt",
-      "cached_report_dir": "Yolov26/10_09_2026",
       "patience": 10,
       "enabled": true
     },
@@ -56,7 +56,6 @@
       "model_type": "fasterrcnn_resnet50_fpn_v2",
       "weights": "/data/runs/10_09_2026_FasterRCNN_ResNet50_640/best.pth",
       "local_weights": "FasterRCNN/10_09_2026/best.pth",
-      "cached_report_dir": "FasterRCNN/10_09_2026",
       "patience": 10,
       "enabled": true
     },
@@ -67,7 +66,6 @@
       "model_type": "fasterrcnn_mobilenet_v3_large_fpn",
       "weights": "",
       "local_weights": "",
-      "cached_report_dir": "",
       "patience": null,
       "enabled": false
     },
@@ -78,7 +76,6 @@
       "model_type": "fcos_resnet50_fpn",
       "weights": "",
       "local_weights": "",
-      "cached_report_dir": "",
       "patience": null,
       "enabled": false
     },
@@ -89,7 +86,6 @@
       "model_type": "yolo",
       "weights": "",
       "local_weights": "",
-      "cached_report_dir": "",
       "patience": null,
       "enabled": false
     },
@@ -100,18 +96,17 @@
       "model_type": "retinanet_resnet50_fpn",
       "weights": "",
       "local_weights": "",
-      "cached_report_dir": "",
       "patience": null,
       "enabled": false
     },
     "RFDETR_Medium": {
-      "display_name": "RFDETF-Medium",
+      "display_name": "RF-DETR-Medium",
       "owner": "Đồng nghiệp",
-      "family": "ultralytics",
-      "model_type": "rtdetr",
+      "family": "rfdetr",
+      "model_type": "rfdetr_medium",
+      "_note": "Hỗ trợ nạp checkpoint chính gốc từ rfdetr (LWDETR + DINOv2) hoặc Ultralytics RT-DETR.",
       "weights": "",
       "local_weights": "",
-      "cached_report_dir": "",
       "patience": null,
       "enabled": false
     },
@@ -122,7 +117,6 @@
       "model_type": "rtdetr",
       "weights": "",
       "local_weights": "",
-      "cached_report_dir": "",
       "patience": null,
       "enabled": false
     }
