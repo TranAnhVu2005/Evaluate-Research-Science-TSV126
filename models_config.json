@@ -15,8 +15,9 @@
     "dummy_category_name": "19-8-BoSungAnhChoCacLopBiTh-v3zo"
   },
   "benchmark_settings": {
-    "protocol_name": "common-coco-v3",
+    "protocol_name": "common-coco-v4-640-b1",
     "imgsz": 640,
+    "expected_num_models": 8,
     "conf_threshold": 0.001,
     "operating_conf_threshold": 0.25,
     "iou_threshold": 0.50,
@@ -121,7 +122,7 @@
       "model_type": "rfdetr_medium",
       "model_class": "RFDETRMedium",
       "label_offset": 0,
-      "imgsz": 576,
+      "imgsz": 640,
       "weights": "",
       "local_weights": "",
       "patience": null,

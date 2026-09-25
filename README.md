@@ -11,7 +11,7 @@ Trong nghiên cứu thị giác máy tính, mỗi thư viện (Ultralytics, Torc
 Hệ thống **`Common_Evaluate`** giải quyết triệt để vấn đề này bằng cách đưa toàn bộ **8 mô hình** về **duy nhất một thước đo chuẩn mực quốc tế**: **MS COCO Evaluation Protocol (`pycocotools.cocoeval.COCOeval`)**:
 * Tất cả 8 mô hình đều nhận diện trên cùng **1.481 ảnh** độc lập của tập Test chuẩn.
 * Dự đoán của mọi mô hình đều được chuẩn hóa về định dạng COCO: `{"image_id", "category_id", "bbox": [xmin, ymin, w, h], "score"}` với tọa độ quy đổi về kích thước ảnh gốc.
-* Đánh giá công bằng, khách quan 100% bằng đối tượng `COCOeval`, đảm bảo tính minh bạch trước Hội đồng Khoa học và các phản biện bài báo quốc tế (Reviewers).
+* Đánh giá thống nhất bằng đối tượng `COCOeval`, với protocol và provenance có thể kiểm chứng khi tổng hợp kết quả.
 
 Ba adapter Ultralytics, Torchvision và RF-DETR vẫn cần thiết, nhưng chúng không phải evaluator. Chúng chỉ tải đúng kiến trúc checkpoint, chạy inference và chuẩn hóa đầu ra khác nhau của từng thư viện thành bốn trường COCO chung: `bbox`, `score`, `category_id`, `image_id`. Sau bước này, toàn bộ metric chỉ được tính bởi `COCOeval`.
 
@@ -31,7 +31,7 @@ Ba adapter Ultralytics, Torchvision và RF-DETR vẫn cần thiết, nhưng chú
     4. **`RetinaNet`** (Torchvision)
     5. **`RFDETR_Medium`** (RF-DETR chính thức của Roboflow; không phải Ultralytics RT-DETR)
     6. **`RTDETR_L`** (RT-DETR Large - Ultralytics)
-  * Cấu hình của 6 mô hình này đã được để trống hoàn toàn trong [`models_config.json`](models_config.json). Đồng nghiệp chỉ cần điền đường dẫn file trọng số `weights`, số epoch kiên nhẫn `patience` và bật `"enabled": true` cho mô hình mình phụ trách.
+  * Pipeline hỗ trợ đủ 8 kiến trúc. Mỗi lượt chạy mặc định chỉ đánh giá các mô hình có `"enabled": true`; người dùng tự chọn model cần chạy và chỉ phải cung cấp checkpoint cho các model đã bật.
 
 ---
 
@@ -111,18 +111,21 @@ Hệ thống tự động nạp Roboflow API Key theo thứ tự ưu tiên:
      "app_name": "app-common-coco-evaluate"
    }
    ```
-2. Đổi `"enabled": false` cho 2 mô hình của Vũ (`YOLOv26X`, `FasterRCNN_ResNet50`).
-3. Với các mô hình mình phụ trách (ví dụ `YOLOv11` và `RetinaNet`):
-   - Điền đường dẫn file trọng số `weights` trên Modal: `"/data/runs/TenThuMucTrain/best.pt"`
-   - Điền số `patience`: ví dụ `10`
-   - Đặt `"enabled": true`
+2. Chọn một hoặc nhiều mô hình cần đánh giá bằng trường `enabled`.
+3. Với từng mô hình đã bật:
+   - Điền đường dẫn checkpoint trên Modal vào `weights`, ví dụ `"/data/runs/TenThuMucTrain/best.pt"`.
+   - Có thể điền đường dẫn dự phòng trên máy local vào `local_weights`.
+   - Điền đúng `patience` đã dùng khi train. Không dùng pretrained checkpoint hoặc random weights thay cho checkpoint sau train.
+   - Đặt `"enabled": true`; các model chưa muốn chạy giữ `"enabled": false`.
+
+Khi chạy local, cũng có thể ghi đè đường dẫn bằng biến môi trường `MODEL_WEIGHTS_<MODEL_KEY>`, ví dụ `MODEL_WEIGHTS_YOLOV11`. Pipeline chỉ kiểm tra checkpoint của các model được chọn trong lượt chạy hiện tại.
 
 Các trường cấu hình quan trọng cho từng framework:
 
 - `family`: một trong `ultralytics`, `torchvision`, `rfdetr`.
 - `model_type`: `yolo`, `rtdetr`, hoặc đúng tên constructor Torchvision đã huấn luyện.
 - `model_class`: class RF-DETR chính thức, ví dụ `RFDETRMedium`.
-- `imgsz`: kích thước inference đúng với checkpoint; RF-DETR Medium mặc định là 576.
+- `imgsz`: bắt buộc là `640` cho cả 8 mô hình. RF-DETR Medium được nạp với resolution override 640; checkpoint phải tương thích với API RF-DETR đang được pin.
 - `label_offset`: thường là `1` cho Torchvision và `0` cho RF-DETR/Ultralytics.
 - `checkpoint_classes`: chỉ cần khai báo khi thứ tự/số lớp trong checkpoint khác danh sách `classes` chung.
 - `class_name_map` và `ignored_checkpoint_classes`: ánh xạ bí danh hoặc bỏ lớp rác một cách tường minh. Pipeline không tự đoán class ID.
@@ -130,7 +133,7 @@ Các trường cấu hình quan trọng cho từng framework:
 ### Bước 3: Chạy đánh giá
 * **Cách 1: Chạy trên Modal Cloud GPU A100 (Khuyến nghị)**:
   ```bash
-  # Tự động đọc .env và models_config.json từ máy bạn, chỉ đánh giá mô hình có enabled: true
+  # Tự động đọc .env và models_config.json, sau đó chạy model có enabled=true
   modal run "Common_Evaluate/common_evaluate.py"::evaluate_my_models
   ```
   *Hoặc đánh giá đích danh 1 mô hình:*
@@ -139,7 +142,7 @@ Các trường cấu hình quan trọng cho từng framework:
   ```
 * **Cách 2: Chạy trên máy cục bộ (Local / Colab / Kaggle)**:
   ```bash
-  # Chạy các mô hình có enabled: true
+  # Chạy các model có enabled=true
   python "Common_Evaluate/common_evaluate.py"
 
   # Hoặc chỉ định danh sách mô hình
@@ -190,10 +193,13 @@ Tập dữ liệu bao gồm 32 lớp nguyên liệu thực phẩm đặc trưng:
 ---
 
 ## 9. Đảm bảo Tính công bằng Khoa học (Scientific Fairness)
-Khi so sánh các mô hình thuộc framework Ultralytics (YOLOv26X, YOLOv11, RT-DETR) với Torchvision (Faster R-CNN, FCOS, RetinaNet), sự công bằng tuyệt đối được đảm bảo nhờ:
+Khi so sánh các mô hình thuộc framework Ultralytics (YOLOv26X, YOLOv11, RT-DETR) với Torchvision (Faster R-CNN, FCOS, RetinaNet), tính nhất quán của benchmark được đảm bảo nhờ:
 1. **Trọng tài độc lập duy nhất**: Không sử dụng hàm tính mAP nội bộ của từng thư viện mà toàn bộ dự đoán được đưa vào đối tượng chuẩn quốc tế `pycocotools.cocoeval.COCOeval`.
 2. **Quy đổi kích thước chuẩn xác**: Tọa độ bounding box dự đoán của mọi mô hình đều được ánh xạ ngược về kích thước pixel gốc của ảnh test $(orig\_w, orig\_h)$.
 3. **Đồng nhất ngưỡng Confidence**: Cả 3 họ adapter đều thiết lập `conf_threshold = 0.001` để xuất dải điểm số cho `COCOeval`; Precision/Recall/F1 được suy ra trực tiếp từ `COCOeval.evalImgs` tại `operating_conf_threshold`, có áp dụng cùng quy tắc match, ignore và crowd của COCO.
 4. **Môi trường phần cứng chuẩn hóa**: Đo đạc độ trễ trên cùng GPU NVIDIA A100 (Modal Cloud) với `batch_size = 1`, cơ chế đồng bộ `torch.cuda.synchronize()` và loại bỏ độ trễ khởi động kernel bằng bước warm-up.
+5. **Khóa giao thức đầu vào**: Cả 8 model bắt buộc inference ở `imgsz = 640`, `batch_size = 1`; ảnh test phải đúng 640 × 640 và merge kiểm tra lại các giá trị này trong cả protocol lẫn provenance.
 
-Mỗi `result_<model>.json` chứa protocol `common-coco-v3`, `protocol_id`, SHA-256 của annotation test và checkpoint, phiên bản thư viện, cấu hình ngưỡng và danh sách lớp. Lệnh merge sẽ từ chối file thiếu protocol hoặc file được tạo từ dataset/evaluator khác; vì vậy không được chép metric từ log train hay cache evaluator cũ vào bảng chung. Confusion matrix chỉ dùng phân tích trực quan, không phải nguồn của Precision/Recall/F1 trong bảng kết quả.
+NMS và hậu xử lý tạo prediction vẫn thuộc implementation chuẩn của từng kiến trúc; `COCOeval` thống nhất cách chấm các prediction đó, không thay thế hậu xử lý nội tại của model.
+
+Mỗi `result_<model>.json` chứa protocol `common-coco-v4-640-b1`, `protocol_id`, SHA-256 của annotation test và checkpoint, phiên bản thư viện, kích thước inference 640, batch size 1, cấu hình ngưỡng và danh sách lớp. Lệnh merge chấp nhận kết quả của các model được đánh giá ở những lượt khác nhau nhưng từ chối file sai protocol, sai kích thước, sai batch hoặc được tạo từ dataset/evaluator khác; model chưa có kết quả được ghi rõ là đang chờ và không tham gia biểu đồ so sánh. Không được chép metric từ log train hay cache evaluator cũ vào bảng chung. Confusion matrix chỉ dùng phân tích trực quan, không phải nguồn của Precision/Recall/F1 trong bảng kết quả.

@@ -5,6 +5,7 @@ import time
 import json
 import argparse
 import gzip
+import gc
 import hashlib
 import importlib.metadata
 import platform
@@ -78,7 +79,7 @@ def build_protocol_metadata(
 ) -> Dict[str, Any]:
     """Describe the evaluator completely; only equal protocol IDs may be merged."""
     protocol = {
-        "name": bench_cfg.get("protocol_name", "common-coco-v3"),
+        "name": bench_cfg.get("protocol_name", "common-coco-v4-640-b1"),
         "evaluator": "pycocotools.cocoeval.COCOeval",
         "evaluator_source_sha256": sha256_file(os.path.abspath(__file__)),
         "iou_type": "bbox",
@@ -89,6 +90,8 @@ def build_protocol_metadata(
         "num_test_images": len(image_ids),
         "categories": [{"id": int(c["id"]), "name": c["name"]} for c in valid_categories],
         "settings": {
+            "inference_imgsz": int(bench_cfg.get("imgsz", 640)),
+            "inference_batch_size": int(bench_cfg.get("batch_size", 1)),
             "prediction_conf_threshold": float(bench_cfg.get("conf_threshold", 0.001)),
             "operating_conf_threshold": float(bench_cfg.get("operating_conf_threshold", 0.25)),
             "operating_iou_threshold": float(bench_cfg.get("iou_threshold", 0.50)),
@@ -120,6 +123,15 @@ def validate_configuration(config_data: Dict[str, Any]) -> None:
     if not classes or len(classes) != len(set(classes)):
         raise ValueError("config.classes must be a non-empty list of unique class names")
 
+    bench_cfg = config_data.get("benchmark_settings", {})
+    required_imgsz = int(bench_cfg.get("imgsz", 0))
+    required_batch_size = int(bench_cfg.get("batch_size", 0))
+    expected_models = int(bench_cfg.get("expected_num_models", 8))
+    if required_imgsz != 640:
+        raise ValueError("The common COCO protocol requires benchmark_settings.imgsz = 640")
+    if required_batch_size != 1:
+        raise ValueError("The common COCO protocol requires benchmark_settings.batch_size = 1")
+
     supported = {
         "ultralytics": {"yolo", "rtdetr"},
         "torchvision": {
@@ -136,6 +148,10 @@ def validate_configuration(config_data: Dict[str, Any]) -> None:
     models = config_data.get("models", {})
     if not models:
         raise ValueError("config.models is empty")
+    if len(models) != expected_models:
+        raise ValueError(
+            f"Expected exactly {expected_models} configured models, found {len(models)}"
+        )
     for model_key, model_cfg in models.items():
         family = model_cfg.get("family")
         model_type = model_cfg.get("model_type")
@@ -148,6 +164,42 @@ def validate_configuration(config_data: Dict[str, Any]) -> None:
             raise ValueError(f"{model_key}.checkpoint_classes contains duplicates")
         if family == "rfdetr" and not model_cfg.get("model_class"):
             raise ValueError(f"{model_key}.model_class is required for RF-DETR")
+        if not isinstance(model_cfg.get("enabled"), bool):
+            raise ValueError(f"{model_key}.enabled must be true or false")
+        model_imgsz = int(model_cfg.get("imgsz", required_imgsz))
+        if model_imgsz != required_imgsz:
+            raise ValueError(
+                f"{model_key}.imgsz={model_imgsz} violates the common inference size "
+                f"of {required_imgsz}"
+            )
+
+
+def resolve_checkpoint_path(model_key: str, model_cfg: Dict[str, Any]) -> Tuple[Optional[str], List[str]]:
+    """Resolve a real checkpoint without ever falling back to pretrained/random weights."""
+    env_key = "MODEL_WEIGHTS_" + "".join(
+        char if char.isalnum() else "_" for char in model_key.upper()
+    )
+    candidates = []
+    env_path = os.environ.get(env_key, "").strip()
+    if env_path:
+        candidates.append(os.path.abspath(os.path.expanduser(env_path)))
+
+    cloud_path = str(model_cfg.get("weights", "")).strip()
+    if cloud_path:
+        candidates.append(os.path.abspath(os.path.expanduser(cloud_path)))
+
+    local_spec = str(model_cfg.get("local_weights", "")).strip()
+    if local_spec:
+        local_path = (
+            local_spec if os.path.isabs(local_spec) else os.path.join(CURRENT_DIR, local_spec)
+        )
+        candidates.append(os.path.abspath(os.path.expanduser(local_path)))
+
+    unique_candidates = list(dict.fromkeys(candidates))
+    for candidate in unique_candidates:
+        if os.path.isfile(candidate):
+            return candidate, unique_candidates
+    return None, unique_candidates
 
 
 def get_roboflow_api_key(config_data: Optional[Dict[str, Any]] = None) -> str:
@@ -669,8 +721,20 @@ class RFDETRAdapter:
         if model_class is None:
             raise ValueError(f"Không tìm thấy class {model_class_name} trong package rfdetr")
 
-        self.model = model_class.from_checkpoint(weights_path, device=device)
+        # RF-DETR Medium defaults to 576, but the shared benchmark is fixed at 640.
+        # RF-DETR supports a square resolution override when it is divisible by
+        # patch_size * num_windows (640 is valid for the Medium variant).
+        self.model = model_class.from_checkpoint(
+            weights_path,
+            device=device,
+            resolution=int(imgsz),
+        )
         self.imgsz = int(getattr(getattr(self.model, "model_config", None), "resolution", imgsz))
+        if self.imgsz != int(imgsz):
+            raise RuntimeError(
+                f"RF-DETR did not apply the required resolution={imgsz}; "
+                f"effective resolution is {self.imgsz}"
+            )
 
     def predict_image(self, image_bgr: np.ndarray, orig_w: int, orig_h: int) -> List[Dict[str, Any]]:
         from PIL import Image
@@ -878,42 +942,30 @@ class COCOBenchmarkEvaluator:
     ) -> Dict[str, Any]:
         from pycocotools.cocoeval import COCOeval
 
-        if len(predictions_list) == 0:
-            valid_images = set(int(image_id) for image_id in image_ids)
-            fn_by_cat = {int(cat_id): 0 for cat_id in valid_cat_ids}
-            for annotation in coco_gt.dataset.get("annotations", []):
-                cat_id = int(annotation["category_id"])
-                if (
-                    cat_id in fn_by_cat
-                    and int(annotation["image_id"]) in valid_images
-                    and int(annotation.get("iscrowd", 0)) == 0
-                    and int(annotation.get("ignore", 0)) == 0
-                ):
-                    fn_by_cat[cat_id] += 1
-            empty_per_class = {
-                coco_gt.loadCats(cat_id)[0]["name"]: {
-                    "Precision": 0.0, "Recall": 0.0, "F1": 0.0,
-                    "TP": 0, "FP": 0, "FN": fn_by_cat[int(cat_id)],
-                    "mAP50": 0.0, "mAP50-95": 0.0, "AR100": 0.0,
-                }
-                for cat_id in valid_cat_ids
-            }
-            total_fn = sum(fn_by_cat.values())
-            return {
-                "Precision": 0.0, "Recall": 0.0, "F1": 0.0,
-                "mAP50_95": 0.0, "mAP50": 0.0, "mAP75": 0.0,
-                "AP_small": 0.0, "AP_medium": 0.0, "AP_large": 0.0,
-                "AR1": 0.0, "AR10": 0.0, "AR100": 0.0,
-                "operating_point": {
-                    "TP": 0, "FP": 0, "FN": total_fn,
-                    "score_threshold": operating_score_threshold,
-                    "iou_threshold": operating_iou_threshold,
-                    "source": "pycocotools-compatible empty detections",
-                },
-                "per_class": empty_per_class,
-            }
+        if predictions_list:
+            coco_dt = coco_gt.loadRes(predictions_list)
+        else:
+            # COCO.loadRes([]) is not supported consistently across pycocotools
+            # versions. Build a valid empty result dataset so even the zero-
+            # detection case is evaluated by COCOeval rather than manual metrics.
+            from pycocotools.coco import COCO
 
-        coco_dt = coco_gt.loadRes(predictions_list)
+            selected_image_ids = set(int(image_id) for image_id in image_ids)
+            coco_dt = COCO()
+            coco_dt.dataset = {
+                "images": [
+                    image
+                    for image in coco_gt.dataset.get("images", [])
+                    if int(image["id"]) in selected_image_ids
+                ],
+                "categories": [
+                    category
+                    for category in coco_gt.dataset.get("categories", [])
+                    if int(category["id"]) in set(int(cat_id) for cat_id in valid_cat_ids)
+                ],
+                "annotations": [],
+            }
+            coco_dt.createIndex()
         coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
         coco_eval.params.catIds = valid_cat_ids
         coco_eval.params.imgIds = sorted(image_ids)
@@ -1249,7 +1301,7 @@ def execute_common_coco_evaluation(
     """
     Quy trình đánh giá có chọn lọc:
     - Nếu target_models được cung cấp: CHỈ đánh giá các mô hình trong danh sách đó.
-    - Nếu không: CHỈ đánh giá các mô hình có 'enabled': true trong config.
+    - Nếu không: chỉ đánh giá các mô hình có `enabled: true`.
     - Mỗi mô hình sau khi đánh giá sẽ xuất một file result_<model>.json để đồng nghiệp gửi nộp.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -1288,7 +1340,7 @@ def execute_common_coco_evaluation(
         raise ValueError("iou_threshold must be in (0, 1]")
     if max_detections != 100:
         raise ValueError(
-            "common-coco-v3 requires max_detections = 100 because COCOeval.summarize() "
+            "The common COCO protocol requires max_detections = 100 because COCOeval.summarize() "
             "defines the primary AP/AR statistics at maxDets=100"
         )
 
@@ -1301,12 +1353,40 @@ def execute_common_coco_evaluation(
             raise ValueError(f"Unknown model keys in --models: {unknown_models}")
         eval_queue = {k: v for k, v in all_models_dict.items() if k in target_models}
     else:
-        # Mặc định chỉ chạy các mô hình có enabled: true (mô hình bạn phụ trách)
-        eval_queue = {k: v for k, v in all_models_dict.items() if v.get("enabled", False)}
+        # Cả 8 kiến trúc đều được hỗ trợ, nhưng người dùng quyết định mô hình
+        # nào tham gia lượt chạy hiện tại bằng cờ enabled.
+        eval_queue = {
+            model_key: model_cfg
+            for model_key, model_cfg in all_models_dict.items()
+            if model_cfg.get("enabled", False)
+        }
 
     if not eval_queue:
-        print("[NOTICE] Không có mô hình nào được bật (enabled: true). Hãy kiểm tra models_config.json!")
+        print(
+            "[NOTICE] Không có mô hình nào được bật. "
+            "Đặt enabled=true cho ít nhất một mô hình trong models_config.json."
+        )
         return []
+
+    resolved_checkpoint_paths = {}
+    missing_checkpoints = []
+    for model_key, model_cfg in eval_queue.items():
+        resolved_path, attempted_paths = resolve_checkpoint_path(model_key, model_cfg)
+        if resolved_path:
+            resolved_checkpoint_paths[model_key] = resolved_path
+        else:
+            env_key = "MODEL_WEIGHTS_" + "".join(
+                char if char.isalnum() else "_" for char in model_key.upper()
+            )
+            attempted = ", ".join(attempted_paths) if attempted_paths else "no path configured"
+            missing_checkpoints.append(
+                f"  - {model_key}: {attempted}; or set {env_key}"
+            )
+    if missing_checkpoints:
+        raise FileNotFoundError(
+            "The evaluation requires a trained checkpoint for every selected model.\n"
+            + "\n".join(missing_checkpoints)
+        )
 
     print("\n" + "="*85)
     print(f"BẮT ĐẦU ĐÁNH GIÁ CHỌN LỌC {len(eval_queue)} MÔ HÌNH ĐƯỢC CHỈ ĐỊNH:")
@@ -1347,6 +1427,16 @@ def execute_common_coco_evaluation(
         raise ValueError(
             "Class names/order in models_config.json do not exactly match the COCO test annotations"
         )
+    invalid_image_sizes = [
+        (int(image_id), int(info["width"]), int(info["height"]))
+        for image_id, info in test_images.items()
+        if (int(info["width"]), int(info["height"])) != (img_size, img_size)
+    ]
+    if invalid_image_sizes:
+        raise ValueError(
+            f"The common protocol requires every test image to be {img_size}x{img_size}; "
+            f"found {len(invalid_image_sizes)} mismatches, first={invalid_image_sizes[:5]}"
+        )
 
     runtime_device = describe_runtime_device(device)
     protocol = build_protocol_metadata(
@@ -1371,27 +1461,9 @@ def execute_common_coco_evaluation(
         print(f"TIẾN HÀNH ĐÁNH GIÁ MÔ HÌNH: [{disp_name}]")
         print("-"*85)
 
-        w_cloud = m_cfg.get("weights", "")
-        local_spec = m_cfg.get("local_weights", "")
-        w_local = (
-            local_spec
-            if local_spec and os.path.isabs(local_spec)
-            else os.path.join(CURRENT_DIR, local_spec) if local_spec else ""
-        )
-        actual_weights = None
-
-        if w_cloud and os.path.exists(w_cloud):
-            actual_weights = w_cloud
-        elif w_local and os.path.exists(w_local):
-            actual_weights = w_local
-
-        # Chỉ nhận checkpoint thật; không nhập lại metric từ evaluator/cache cũ.
-        if not actual_weights:
-            print(
-                f"  --> [ERROR] Missing weights for '{disp_name}'. "
-                "Cached metrics are not accepted because they cannot prove the same evaluation protocol."
-            )
-            continue
+        # Đã kiểm tra đồng loạt trước khi tải dataset để không bao giờ xuất báo
+        # cáo một phần khi thiếu checkpoint của một model được chọn.
+        actual_weights = resolved_checkpoint_paths[m_key]
 
         print(f"  [MODEL] Khởi tạo mô hình từ: {actual_weights}")
         model_img_size = int(m_cfg.get("imgsz", img_size))
@@ -1418,10 +1490,10 @@ def execute_common_coco_evaluation(
         else:
             raise ValueError(f"Unsupported model family: {m_cfg['family']}")
         effective_img_size = int(getattr(adapter, "imgsz", model_img_size))
-        if effective_img_size != model_img_size:
+        if effective_img_size != img_size:
             raise ValueError(
-                f"Configured imgsz={model_img_size} for {m_key}, but checkpoint reports "
-                f"resolution={effective_img_size}. Update models_config.json to the trained resolution."
+                f"{m_key} must run at the common imgsz={img_size}, but its adapter reports "
+                f"effective resolution={effective_img_size}."
             )
 
         # 1. Đo GFLOPs và Parameters
@@ -1538,6 +1610,7 @@ def execute_common_coco_evaluation(
                 "model_class": m_cfg.get("model_class"),
                 "checkpoint_sha256": sha256_file(actual_weights),
                 "inference_imgsz": effective_img_size,
+                "inference_batch_size": batch_size,
                 "device": device,
             },
             "operating_point": eval_metrics["operating_point"],
@@ -1550,6 +1623,17 @@ def execute_common_coco_evaluation(
         with open(res_json_file, "w", encoding="utf-8") as rf:
             json.dump(res_item, rf, ensure_ascii=False, indent=2)
         print(f"  --> [ĐÓNG GÓI] Đã lưu file kết quả chuẩn hóa: {res_json_file}")
+
+        # Giải phóng model trước khi khởi tạo model kế tiếp. Nếu không, Python
+        # vẫn giữ adapter cũ trong lúc dựng adapter mới và có thể làm GPU OOM.
+        del adapter
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     # Xuất báo cáo tổng hợp cho các mô hình vừa chạy
     ScientificReportVisualizer.generate_all_reports(
@@ -1579,6 +1663,10 @@ def merge_team_results(results_dir: str, output_dir: Optional[str] = None):
         config_data = json.load(f)
     validate_configuration(config_data)
     all_models = config_data.get("models", {})
+    bench_cfg = config_data.get("benchmark_settings", {})
+    required_protocol_name = bench_cfg.get("protocol_name", "common-coco-v4-640-b1")
+    required_imgsz = int(bench_cfg.get("imgsz", 640))
+    required_batch_size = int(bench_cfg.get("batch_size", 1))
 
     # Đọc tất cả các file result_*.json
     collected_results = {}
@@ -1594,7 +1682,29 @@ def merge_team_results(results_dir: str, output_dir: Optional[str] = None):
                         raise ValueError(f"Unknown model_key '{m_key}'")
                     protocol_id = data.get("protocol", {}).get("protocol_id")
                     if not protocol_id:
-                        raise ValueError("Missing protocol.protocol_id; re-run with common-coco-v3")
+                        raise ValueError(
+                            f"Missing protocol.protocol_id; re-run with {required_protocol_name}"
+                        )
+                    protocol = data.get("protocol", {})
+                    protocol_settings = protocol.get("settings", {})
+                    if protocol.get("name") != required_protocol_name:
+                        raise ValueError(
+                            f"Protocol name must be {required_protocol_name}, got {protocol.get('name')}"
+                        )
+                    if protocol.get("evaluator") != "pycocotools.cocoeval.COCOeval":
+                        raise ValueError("Result was not produced by pycocotools COCOeval")
+                    if int(protocol_settings.get("inference_imgsz", -1)) != required_imgsz:
+                        raise ValueError(f"Result was not evaluated at imgsz={required_imgsz}")
+                    if int(protocol_settings.get("inference_batch_size", -1)) != required_batch_size:
+                        raise ValueError(f"Result was not evaluated at batch_size={required_batch_size}")
+                    if int(data.get("model_provenance", {}).get("inference_imgsz", -1)) != required_imgsz:
+                        raise ValueError(
+                            f"model_provenance.inference_imgsz must be {required_imgsz}"
+                        )
+                    if int(data.get("model_provenance", {}).get("inference_batch_size", -1)) != required_batch_size:
+                        raise ValueError(
+                            f"model_provenance.inference_batch_size must be {required_batch_size}"
+                        )
                     if m_key in collected_results:
                         raise ValueError(f"Duplicate result for model_key '{m_key}'")
                     protocol_ids.add(protocol_id)
@@ -1609,23 +1719,30 @@ def merge_team_results(results_dir: str, output_dir: Optional[str] = None):
             + ", ".join(sorted(protocol_ids))
         )
 
-    # Ghép vào danh sách 8 mô hình đầy đủ
+    # Hiển thị đủ danh mục 8 kiến trúc; model chưa được bật/chưa có kết quả được
+    # đánh dấu là đang chờ, tuyệt đối không giả lập metric cho model đó.
     master_results_list = []
-    for m_key, m_cfg in all_models.items():
-        disp_name = m_cfg.get("display_name", m_key)
-        if m_key in collected_results:
-            master_results_list.append(collected_results[m_key])
+    for model_key, model_cfg in all_models.items():
+        if model_key in collected_results:
+            master_results_list.append(collected_results[model_key])
         else:
-            # Mô hình đồng nghiệp chưa nộp kết quả
             master_results_list.append({
-                "model_key": m_key,
-                "model_name": disp_name,
-                "Precision": 0.0, "Recall": 0.0, "F1": 0.0,
-                "mAP50": 0.0, "mAP50_95": 0.0, "mAP75": 0.0, "AR100": 0.0,
-                "Patience": m_cfg.get("patience"),
-                "GFLOPs": 0.0, "Parameters": 0.0, "Latency": 0.0, "FPS": 0.0,
-                "status": "Chờ kết quả từ đồng nghiệp",
-                "per_class": {}
+                "model_key": model_key,
+                "model_name": model_cfg.get("display_name", model_key),
+                "Precision": 0.0,
+                "Recall": 0.0,
+                "F1": 0.0,
+                "mAP50": 0.0,
+                "mAP50_95": 0.0,
+                "mAP75": 0.0,
+                "AR100": 0.0,
+                "Patience": model_cfg.get("patience"),
+                "GFLOPs": 0.0,
+                "Parameters": 0.0,
+                "Latency": 0.0,
+                "FPS": 0.0,
+                "status": "Chờ kết quả đánh giá",
+                "per_class": {},
             })
 
     # Lấy danh mục 32 lớp từ cấu hình
@@ -1684,7 +1801,7 @@ def evaluate_models_cloud(model_names: Optional[List[str]] = None, config_dict: 
 @app.local_entrypoint()
 def evaluate_my_models():
     """
-    Lệnh CLI chạy đánh giá trên Modal Cloud cho các mô hình mình phụ trách (enabled: true):
+    Lệnh CLI chạy các mô hình có enabled=true trên Modal Cloud:
     modal run "Common_Evaluate/common_evaluate.py"::evaluate_my_models
     """
     local_cfg = load_config()
@@ -1697,7 +1814,7 @@ def evaluate_my_models():
     sub_dir = bench_cfg.get("local_output_dir", "Common_Evaluate/Results").split("/")[-1]
     local_out = os.path.join(CURRENT_DIR, sub_dir)
 
-    print(f"[CLOUD] Bắt đầu đánh giá các mô hình bạn phụ trách trên Modal Cloud ({MODAL_GPU})...")
+    print(f"[CLOUD] Bắt đầu đánh giá các mô hình đã bật trên Modal Cloud ({MODAL_GPU})...")
     files = evaluate_models_cloud.remote(config_dict=local_cfg)
 
     os.makedirs(local_out, exist_ok=True)
