@@ -74,7 +74,7 @@
       "weights": "/data/runs/10_09_2026_YOLO26X_640/best.pt",
       "local_weights": "Yolov26/10_09_2026/best.pt",
       "patience": 10,
-      "enabled": true
+      "enabled": false
     },
     "FasterRCNN_ResNet50": {
       "display_name": "Faster R-CNN + ResNet50",
@@ -84,7 +84,7 @@
       "weights": "/data/runs/10_09_2026_FasterRCNN_ResNet50_640/best.pth",
       "local_weights": "FasterRCNN/10_09_2026/best.pth",
       "patience": 10,
-      "enabled": true
+      "enabled": false
     },
     "FasterRCNN_MobileNetv3Large": {
       "display_name": "FasterRCNN_MobileNetv3Large",
@@ -129,11 +129,10 @@
     "RFDETR_Medium": {
       "display_name": "RFDETR-Medium",
       "owner": "Đồng nghiệp",
-      "family": "ultralytics",
-      "model_type": "rtdetr",
-      "weights": "/data/runs/synced_results_v4/checkpoints/rfdetr/best.pth",
+      "family": "rfdetr",
+      "model_type": "rfdetr",
+      "weights": "/models/RFDETR_Medium/best.pth",
       "local_weights": "Evaluate-Research-Science-TSV126/models/RFDETR_Medium/best.pth",
-      "cached_report_dir": "",
       "patience": 10,
       "enabled": true
     },
@@ -142,9 +141,8 @@
       "owner": "Đồng nghiệp",
       "family": "ultralytics",
       "model_type": "rtdetr",
-      "weights": "/data/runs/synced_results_v4/checkpoints/rtdetr/best.pt",
+      "weights": "/models/RTDETR_L/best.pt",
       "local_weights": "Evaluate-Research-Science-TSV126/models/RTDETR_L/best.pt",
-      "cached_report_dir": "",
       "patience": 10,
       "enabled": true
     }
