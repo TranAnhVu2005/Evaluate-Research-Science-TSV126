@@ -105,26 +105,26 @@
       "enabled": false
     },
     "RFDETR_Medium": {
-      "display_name": "RFDETF-Medium",
+      "display_name": "RFDETR-Medium",
       "owner": "Đồng nghiệp",
       "family": "ultralytics",
       "model_type": "rtdetr",
-      "weights": "",
-      "local_weights": "",
+      "weights": "/data/runs/synced_results_v4/checkpoints/rfdetr/best.pth",
+      "local_weights": "Evaluate-Research-Science-TSV126/models/RFDETR_Medium/best.pth",
       "cached_report_dir": "",
-      "patience": null,
-      "enabled": false
+      "patience": 10,
+      "enabled": true
     },
     "RTDETR_L": {
       "display_name": "RTDETR-L",
       "owner": "Đồng nghiệp",
       "family": "ultralytics",
       "model_type": "rtdetr",
-      "weights": "",
-      "local_weights": "",
+      "weights": "/data/runs/synced_results_v4/checkpoints/rtdetr/best.pt",
+      "local_weights": "Evaluate-Research-Science-TSV126/models/RTDETR_L/best.pt",
       "cached_report_dir": "",
-      "patience": null,
-      "enabled": false
+      "patience": 10,
+      "enabled": true
     }
   }
 }
