@@ -48,19 +48,19 @@ dataset = version.download("coco")
 ---
 
 ## 4. Bảng 10 thông số chuẩn mực bắt buộc đo lường
-Toàn bộ kết quả đều được xuất ra định dạng bảng 10 cột chuẩn:
+Toàn bộ kết quả đều được xuất ra định dạng bảng 10 cột chuẩn khoa học:
 
 | STT | Tên thông số | Định dạng | Phương pháp & Tiêu chuẩn đo lường |
 | :---: | :--- | :---: | :--- |
 | 1 | **Mô hình** | Text | Tên định danh của mô hình (Model Name) |
-| 2 | **Precision** | Float (`.4f`) | Độ chính xác tại $\text{IoU} = 0.50$ (TP / (TP + FP)) |
-| 3 | **Recall** | Float (`.4f`) | Độ nhạy bao phủ theo chuẩn COCO (Average Recall AR@100 - `stats[8]`) |
-| 4 | **mAP@50** | Float (`.4f`) | Mean Average Precision tại $\text{IoU} = 0.50$ (`stats[1]`) |
-| 5 | **mAP@50-95** | Float (`.4f`) | COCO Primary Challenge Metric (Trung bình AP từ IoU 0.50 đến 0.95, bước 0.05) |
+| 2 | **Precision** | Float (`.4f`) | Độ chính xác vận hành thực tế tại điểm $\text{conf} \ge 0.25, \text{IoU} \ge 0.50$: $\frac{TP}{TP + FP}$ |
+| 3 | **Recall** | Float (`.4f`) | Độ nhạy vận hành thực tế tại điểm $\text{conf} \ge 0.25, \text{IoU} \ge 0.50$: $\frac{TP}{TP + FN}$ |
+| 4 | **mAP@50** | Float (`.4f`) | Diện tích dưới đường cong Precision-Recall tại $\text{IoU} = 0.50$ chuẩn MS COCO (`stats[1]`) |
+| 5 | **mAP@50-95** | Float (`.4f`) | COCO Primary Metric (Trung bình AP từ IoU 0.50 đến 0.95, bước 0.05 - `stats[0]`) |
 | 6 | **Patience** | Integer | Số epoch chờ khi Early Stopping trong quá trình huấn luyện |
-| 7 | **GFLOPs** | Float (`.2f`) | Độ phức tạp tính toán (tỷ phép tính) đo bằng `thop` trên Dummy Input $1 \times 3 \times 640 \times 640$ |
-| 8 | **Parameters** | Float (`.2f` M) | Tổng số tham số của mô hình (triệu tham số - Millions) |
-| 9 | **Latency** | Float (`.2f` ms) | Thời gian xử lý trung bình 1 ảnh trên GPU A100 (đo trên 1.481 ảnh với batch size = 1) |
+| 7 | **GFLOPs** | Float (`.2f`) | Độ phức tạp tính toán (tỷ phép tính) đo thực nghiệm bằng `thop` trên Dummy Input $1 \times 3 \times 640 \times 640$ (không dùng công thức giả định) |
+| 8 | **Parameters** | Float (`.2f` M) | Tổng số tham số thực tế của mô hình (triệu tham số - Millions) đếm trực tiếp từ PyTorch module |
+| 9 | **Latency** | Float (`.2f` ms) | Độ trễ toàn trình End-to-End (Đọc ảnh cv2 + Letterbox tiền xử lý + Suy luận PyTorch + Giải mã Boxes) trên GPU A100 với batch size = 1 |
 | 10 | **FPS** | Float (`.2f`) | Tốc độ khung hình trên giây ($\text{FPS} = 1000 / \text{Latency}$) |
 
 ---
@@ -173,9 +173,34 @@ Tập dữ liệu bao gồm 32 lớp nguyên liệu thực phẩm đặc trưng:
 
 ---
 
-## 9. Đảm bảo Tính công bằng Khoa học (Scientific Fairness)
-Khi so sánh các mô hình thuộc framework Ultralytics (YOLOv26X, YOLOv11, RT-DETR) với Torchvision (Faster R-CNN, FCOS, RetinaNet), sự công bằng tuyệt đối được đảm bảo nhờ:
-1. **Trọng tài độc lập duy nhất**: Không sử dụng hàm tính mAP nội bộ của từng thư viện mà toàn bộ dự đoán được đưa vào đối tượng chuẩn quốc tế `pycocotools.cocoeval.COCOeval`.
-2. **Quy đổi kích thước chuẩn xác**: Tọa độ bounding box dự đoán của mọi mô hình đều được ánh xạ ngược về kích thước pixel gốc của ảnh test $(orig\_w, orig\_h)$.
-3. **Đồng nhất ngưỡng Confidence**: Cả 2 Adapter đều thiết lập `conf_threshold = 0.001` để xuất trọn vẹn dải điểm số, giúp `COCOeval` vẽ đầy đủ diện tích dưới đường cong Precision-Recall.
-4. **Môi trường phần cứng chuẩn hóa**: Đo đạc độ trễ trên cùng GPU NVIDIA A100 (Modal Cloud) với `batch_size = 1`, cơ chế đồng bộ `torch.cuda.synchronize()` và loại bỏ độ trễ khởi động kernel bằng bước warm-up.
+## 9. Đảm bảo Tính công bằng & Minh bạch Khoa học (Scientific Fairness & Rigor)
+Khi so sánh các mô hình thuộc các framework và họ kiến trúc khác nhau (Ultralytics, Torchvision, RF-DETR), sự công bằng và tính khoa học được đảm bảo tuyệt đối qua 6 nguyên tắc cốt lõi:
+
+1. **Đồng nhất tiền xử lý bằng Letterbox (Aspect-Ratio Preserved)**:
+   - Thay vì dùng `cv2.resize` bóp méo khung hình, cả Ultralytics và Torchvision đều được áp dụng thuật toán `letterbox` chuẩn với padding màu xám `(114, 114, 114)` đưa về kích thước $640 \times 640$.
+   - Tọa độ Bounding Box được ánh xạ ngược chuẩn xác: $x_{\text{orig}} = (x_{\text{box}} - dw) / ratio$ và $y_{\text{orig}} = (y_{\text{box}} - dh) / ratio$. Không có bất kỳ mô hình nào bị thiên vị do biến dạng hình học.
+
+2. **Trọng tài độc lập duy nhất**:
+   - Không dùng bất kỳ hàm tính mAP hay evaluator nội bộ của riêng Ultralytics hay Torchvision.
+   - Toàn bộ kết quả bounding box của 8 mô hình được chuẩn hóa và đánh giá trực tiếp qua đối tượng chính quy quốc tế `pycocotools.cocoeval.COCOeval`.
+
+3. **Phân định rạch ròi giữa Operational Precision/Recall và COCO mAP**:
+   - Khắc phục triệt để lỗi đánh đồng "Precision" với $AP_{50}$.
+   - **`Precision`** và **`Recall`**: Đo đạc độ chính xác và độ nhạy vận hành thực tế tại điểm $\text{conf} \ge 0.25, \text{IoU} \ge 0.50$ qua greedy box matching, đồng bộ 100% với Confusion Matrix.
+   - **`mAP@50`** và **`mAP@50-95`**: Tính toán theo diện tích tích phân toàn dải chuẩn MS COCO (`stats[1]` và `stats[0]`).
+
+4. **Tuyệt đối KHÔNG sử dụng số liệu hardcode / cache giả lập**:
+   - Hệ thống loại bỏ hoàn toàn mọi khối fallback giả lập số liệu. Nếu thiếu file weights thực tế (`best.pt`, `best.pth`), mô hình sẽ nhận trạng thái `"Chưa có file weights"` với các chỉ số bằng `0.0`.
+   - Mọi kết quả công bố bắt buộc phải được suy luận trực tiếp từ file trọng số thật trên 1.481 ảnh test.
+
+5. **Bộ điều hợp hoàn chỉnh cho RF-DETR (`RFDETRNativeAdapter`)**:
+   - Tích hợp pipeline suy luận trực tiếp từ package `rfdetr` chính gốc (`RFDETRMedium` + PIL Image format), tự động giải mã cấu trúc `supervision.Detections` (`xyxy`, `confidence`, `class_id`) và quy đổi chuẩn xác về COCO category IDs của 32 lớp nguyên liệu.
+   - Cơ chế nạp checkpoint linh hoạt: Ưu tiên nạp native qua `rfdetr.RFDETRMedium`, có cảnh báo minh bạch nếu môi trường thiếu thư viện và bắt buộc fallback sang Ultralytics RT-DETR.
+
+6. **Đồng nhất nguồn cấu hình ngưỡng vận hành (`eval_conf_threshold`)**:
+   - Khắc phục nguy cơ lệch ngưỡng: Thông số `eval_conf_threshold: 0.25` được khai báo tập trung trong `models_config.json` và dùng chung đồng thời cho cả thuật toán tính toán Operational Precision & Recall lẫn ma trận nhầm lẫn Confusion Matrix.
+   - Lưu trữ song song chỉ số `coco_ar100` (Average Recall chuẩn COCO tại maxDets=100) trong file kết quả JSON.
+
+7. **Đo đạc hiệu năng tính toán thực nghiệm chuẩn xác**:
+   - **Latency**: Đo lường End-to-End trọn vẹn (Đọc ảnh `cv2.imread` + Letterbox + Suy luận PyTorch GPU + Giải mã Bounding Boxes) trên GPU NVIDIA A100 với Batch Size = 1.
+   - **GFLOPs**: Đo thực nghiệm bằng `thop`. Nếu cấu trúc Transformer động không được thư viện hỗ trợ, hệ thống ghi nhận `0.0` kèm cảnh báo rõ ràng, tuyệt đối không dùng công thức nhân hệ số áng chừng không có căn cứ khoa học.
