@@ -1,51 +1,13 @@
-"""
-================================================================================
-HỆ THỐNG ĐÁNH GIÁ CHUẨN COCO (COCOEVAL BENCHMARK) CHO 8 MÔ HÌNH OBJECT DETECTION
-PHIÊN BẢN HỢP TÁC NHÓM (MULTI-RESEARCHER DECENTRALIZED WORKFLOW)
-================================================================================
-ĐỀ TÀI          : NGHIÊN CỨU KHOA HỌC - NHẬN DIỆN NGUYÊN LIỆU NẤU ĂN (32 LỚP)
-NGƯỜI THỰC HIỆN : TRẦN ANH VŨ (ĐẠI HỌC CẦN THƠ - CTU)
-PHÂN CÔNG VAI TRÒ:
-  1. Trần Anh Vũ : Huấn luyện và đánh giá 2 mô hình cốt lõi:
-                   - YOLOv26X
-                   - Faster R-CNN + ResNet50
-  2. Đồng nghiệp : Mỗi người huấn luyện các mô hình được phân công trên tài khoản Modal
-                   hoặc máy riêng của mình, sau đó gửi file kết quả `result_<model>.json`
-                   để tự động gộp (merge) vào bảng tổng hợp 8 mô hình của toàn đội!
-
-10 THÔNG SỐ CHUẨN BẮT BUỘC ĐƯỢC ĐO LƯỜNG:
-  1. Mô hình    : Tên định danh của mô hình
-  2. Precision  : Độ chính xác tại IoU=0.50 (TP / (TP + FP))
-  3. Recall     : Độ nhạy bao phủ theo chuẩn COCO (AR@100 từ stats[8])
-  4. mAP@50     : Mean Average Precision tại IoU=0.50 (stats[1])
-  5. mAP@50-95  : COCO Primary Challenge Metric (trung bình mAP từ IoU 0.50 -> 0.95)
-  6. Patience   : Số epochs kiên nhẫn khi Early Stopping
-  7. GFLOPs     : Độ phức tạp tính toán (tỷ phép tính trên Dummy Input 1x3x640x640)
-  8. Parameters : Tổng số tham số của mô hình tính bằng triệu (Millions - M)
-  9. Latency    : Thời gian xử lý trung bình 1 ảnh (ms) trên GPU A100 (batch size = 1)
-  10. FPS       : Tốc độ khung hình xử lý trong 1 giây (FPS = 1000 / Latency)
-
-CÁCH THỰC THI:
-  A. Đánh giá các mô hình mình phụ trách (Mặc định chỉ chạy mô hình có enabled: true):
-     - Trên Modal Cloud (GPU A100):
-         modal run "Common_Evaluate/common_evaluate.py"::evaluate_my_models
-     - Trên máy cục bộ:
-         python "Common_Evaluate/common_evaluate.py"
-
-  B. Đánh giá 1 mô hình cụ thể:
-     - modal run "Common_Evaluate/common_evaluate.py"::evaluate_single --model-name YOLOv26X
-     - python "Common_Evaluate/common_evaluate.py" --models YOLOv26X
-
-  C. Hợp nhất toàn bộ kết quả của các thành viên trong nhóm (Master Merge):
-     - python "Common_Evaluate/common_evaluate.py" --merge-dir ./team_results
-================================================================================
-"""
+"""Config-driven COCOeval benchmark for eight object-detection models."""
 
 import os
-import sys
 import time
 import json
 import argparse
+import gzip
+import hashlib
+import importlib.metadata
+import platform
 from typing import Dict, List, Any, Optional, Tuple
 
 import numpy as np
@@ -70,6 +32,122 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         except Exception as e:
             print(f"[WARNING] Không thể đọc file cấu hình tại {path}: {e}")
     return {}
+
+
+def sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
+    """Create a content fingerprint for dataset and checkpoint provenance."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def installed_version(distribution_name: str) -> str:
+    try:
+        return importlib.metadata.version(distribution_name)
+    except importlib.metadata.PackageNotFoundError:
+        return "not-installed"
+
+
+def describe_runtime_device(device: str) -> str:
+    try:
+        import torch
+        if str(device).startswith("cuda") and torch.cuda.is_available():
+            index = torch.device(device).index or 0
+            return torch.cuda.get_device_name(index)
+    except Exception:
+        pass
+    return platform.processor() or "cpu"
+
+
+def default_compute_device() -> str:
+    try:
+        import torch
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def build_protocol_metadata(
+    bench_cfg: Dict[str, Any],
+    annotation_sha256: str,
+    image_ids: List[int],
+    valid_categories: List[Dict[str, Any]],
+    runtime_device: str,
+) -> Dict[str, Any]:
+    """Describe the evaluator completely; only equal protocol IDs may be merged."""
+    protocol = {
+        "name": bench_cfg.get("protocol_name", "common-coco-v3"),
+        "evaluator": "pycocotools.cocoeval.COCOeval",
+        "evaluator_source_sha256": sha256_file(os.path.abspath(__file__)),
+        "iou_type": "bbox",
+        "annotation_sha256": annotation_sha256,
+        "image_ids_sha256": hashlib.sha256(
+            json.dumps(sorted(int(i) for i in image_ids), separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        "num_test_images": len(image_ids),
+        "categories": [{"id": int(c["id"]), "name": c["name"]} for c in valid_categories],
+        "settings": {
+            "prediction_conf_threshold": float(bench_cfg.get("conf_threshold", 0.001)),
+            "operating_conf_threshold": float(bench_cfg.get("operating_conf_threshold", 0.25)),
+            "operating_iou_threshold": float(bench_cfg.get("iou_threshold", 0.50)),
+            "operating_metric_source": "pycocotools.COCOeval.evalImgs",
+            "operating_averaging": "micro_over_all_categories",
+            "max_detections": int(bench_cfg.get("max_detections", 100)),
+            "latency_batch_size": int(bench_cfg.get("batch_size", 1)),
+            "latency_warmup_runs": int(bench_cfg.get("warmup_runs", 10)),
+            "runtime_device": runtime_device,
+            "coco_iou_thresholds": [round(float(v), 2) for v in np.arange(0.50, 0.96, 0.05)],
+            "coco_area_ranges": ["all", "small", "medium", "large"],
+        },
+        "software": {
+            "python": platform.python_version(),
+            "pycocotools": installed_version("pycocotools"),
+            "torch": installed_version("torch"),
+            "torchvision": installed_version("torchvision"),
+            "ultralytics": installed_version("ultralytics"),
+            "rfdetr": installed_version("rfdetr"),
+        },
+    }
+    canonical = json.dumps(protocol, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    protocol["protocol_id"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return protocol
+
+
+def validate_configuration(config_data: Dict[str, Any]) -> None:
+    classes = config_data.get("classes", [])
+    if not classes or len(classes) != len(set(classes)):
+        raise ValueError("config.classes must be a non-empty list of unique class names")
+
+    supported = {
+        "ultralytics": {"yolo", "rtdetr"},
+        "torchvision": {
+            "fasterrcnn_resnet50_fpn",
+            "fasterrcnn_resnet50_fpn_v2",
+            "fasterrcnn_mobilenet_v3_large_fpn",
+            "fasterrcnn_mobilenet_v3_large_320_fpn",
+            "fcos_resnet50_fpn",
+            "retinanet_resnet50_fpn",
+            "retinanet_resnet50_fpn_v2",
+        },
+        "rfdetr": {"rfdetr_medium"},
+    }
+    models = config_data.get("models", {})
+    if not models:
+        raise ValueError("config.models is empty")
+    for model_key, model_cfg in models.items():
+        family = model_cfg.get("family")
+        model_type = model_cfg.get("model_type")
+        if family not in supported or model_type not in supported[family]:
+            raise ValueError(
+                f"Unsupported configuration for {model_key}: family={family}, model_type={model_type}"
+            )
+        checkpoint_classes = model_cfg.get("checkpoint_classes")
+        if checkpoint_classes and len(checkpoint_classes) != len(set(checkpoint_classes)):
+            raise ValueError(f"{model_key}.checkpoint_classes contains duplicates")
+        if family == "rfdetr" and not model_cfg.get("model_class"):
+            raise ValueError(f"{model_key}.model_class is required for RF-DETR")
 
 
 def get_roboflow_api_key(config_data: Optional[Dict[str, Any]] = None) -> str:
@@ -129,9 +207,10 @@ image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("git", "libgl1-mesa-glx", "libglib2.0-0")
     .pip_install(
-        "torch==2.3.0",
-        "torchvision==0.18.0",
-        "ultralytics>=8.3.0",
+        "torch==2.5.1",
+        "torchvision==0.20.1",
+        "ultralytics==8.4.161",
+        "rfdetr==1.11.0",
         "roboflow>=1.1.33",
         "opencv-python-headless>=4.10.0.84",
         "pandas>=2.2.0",
@@ -141,7 +220,7 @@ image = (
         "pillow>=10.3.0",
         "thop>=0.1.1",
         "tabulate>=0.9.0",
-        "pycocotools>=2.0.7",
+        "pycocotools==2.0.8",
         "tqdm>=4.66.0"
     )
 )
@@ -161,7 +240,6 @@ class RoboflowCOCODatasetManager:
         project: str = "completed-project",
         version: int = 5,
         dummy_cat_name: str = "19-8-BoSungAnhChoCacLopBiTh-v3zo",
-        fallback_classes: Optional[List[str]] = None
     ):
         self.api_key = api_key if api_key else get_roboflow_api_key()
         self.dataset_root = dataset_root
@@ -169,7 +247,6 @@ class RoboflowCOCODatasetManager:
         self.project = project
         self.version = version
         self.dummy_cat_name = dummy_cat_name
-        self.fallback_classes = fallback_classes or []
         self.coco_gt = None
         self.valid_categories = []
         self.valid_cat_ids = []
@@ -177,6 +254,7 @@ class RoboflowCOCODatasetManager:
         self.name_to_cat_id = {}
         self.test_images = {}
         self.test_image_paths = []
+        self.test_annotation_sha256 = ""
 
     def ensure_dataset(self, target_dir: Optional[str] = None) -> str:
         """Đảm bảo tập dữ liệu có sẵn (tái sử dụng từ cache hoặc tải từ Roboflow)."""
@@ -197,7 +275,7 @@ class RoboflowCOCODatasetManager:
                     self.dataset_root = p
                     return p
 
-        download_dir = target_dir or candidate_paths[0]
+        download_dir = target_dir or self.dataset_root or os.path.join(CURRENT_DIR, "dataset")
         os.makedirs(download_dir, exist_ok=True)
         if not self.api_key:
             raise ValueError(
@@ -220,7 +298,7 @@ class RoboflowCOCODatasetManager:
 
         actual_path = actual_location
         if not os.path.exists(os.path.join(actual_path, "test", "_annotations.coco.json")):
-            for root, dirs, files in os.walk(download_dir):
+            for root, _, files in os.walk(download_dir):
                 if "_annotations.coco.json" in files and os.path.basename(root) == "test":
                     actual_path = os.path.dirname(root)
                     break
@@ -235,7 +313,7 @@ class RoboflowCOCODatasetManager:
 
         test_ann = os.path.join(self.dataset_root, "test", "_annotations.coco.json")
         if not os.path.exists(test_ann):
-            for root, dirs, files in os.walk(self.dataset_root):
+            for root, _, files in os.walk(self.dataset_root):
                 if "_annotations.coco.json" in files and os.path.basename(root) == "test":
                     test_ann = os.path.join(root, "_annotations.coco.json")
                     break
@@ -244,6 +322,7 @@ class RoboflowCOCODatasetManager:
             raise FileNotFoundError(f"[ERROR] Không tìm thấy test/_annotations.coco.json trong {self.dataset_root}")
 
         print(f"[DATASET] Nạp COCO Ground Truth từ: {test_ann}")
+        self.test_annotation_sha256 = sha256_file(test_ann)
         self.coco_gt = COCO(test_ann)
 
         raw_cats = sorted(self.coco_gt.dataset.get("categories", []), key=lambda x: x["id"])
@@ -274,43 +353,128 @@ class RoboflowCOCODatasetManager:
                 }
                 self.test_image_paths.append(actual_f)
 
+        missing_image_ids = sorted(set(self.coco_gt.getImgIds()) - set(self.test_images))
+        if missing_image_ids:
+            raise FileNotFoundError(
+                f"Missing {len(missing_image_ids)} test images declared in the COCO JSON; "
+                f"first image IDs: {missing_image_ids[:10]}. Refusing a partial evaluation."
+            )
+
         print(f"[DATASET] Sẵn sàng đánh giá trên {len(self.valid_categories)} lớp nguyên liệu và {len(self.test_image_paths)} ảnh test.\n")
         return self.coco_gt, self.valid_categories, self.test_images
 
 
 # ==============================================================================
-# PHẦN 3: BỘ ĐIỀU HỢP MÔ HÌNH ĐA NĂNG (UNIFIED MODEL ADAPTERS)
+# PHẦN 3: CHUẨN HÓA ĐẦU RA MÔ HÌNH VỀ COCO
 # ==============================================================================
-class BaseModelAdapter:
-    """Giao diện trừu tượng chuẩn hóa đầu ra cho mọi mô hình Object Detection."""
-    def predict_image(self, image_bgr: np.ndarray, orig_w: int, orig_h: int) -> List[Dict[str, Any]]:
-        raise NotImplementedError
+def build_class_mapping(
+    indexed_names: Dict[int, str],
+    name_to_cat_id: Dict[str, int],
+    model_cfg: Dict[str, Any],
+    backend_name: str,
+) -> Tuple[Dict[int, int], set[int]]:
+    """Build an explicit checkpoint-index -> COCO-category mapping."""
+    aliases = model_cfg.get("class_name_map", {})
+    ignored_names = set(model_cfg.get("ignored_checkpoint_classes", []))
+    index_to_cat_id = {}
+    ignored_indices = set()
+    unknown = []
 
-    def get_torch_module(self):
-        raise NotImplementedError
+    for index, raw_name in indexed_names.items():
+        if raw_name in ignored_names:
+            ignored_indices.add(int(index))
+            continue
+        canonical_name = aliases.get(raw_name, raw_name)
+        if canonical_name not in name_to_cat_id:
+            unknown.append(raw_name)
+            continue
+        index_to_cat_id[int(index)] = int(name_to_cat_id[canonical_name])
+
+    if (
+        unknown
+        or len(index_to_cat_id) != len(name_to_cat_id)
+        or set(index_to_cat_id.values()) != set(name_to_cat_id.values())
+    ):
+        raise ValueError(
+            f"{backend_name} checkpoint classes do not map one-to-one onto COCO ground truth. "
+            f"Unknown={unknown}; configure checkpoint_classes/class_name_map/"
+            "ignored_checkpoint_classes."
+        )
+    return index_to_cat_id, ignored_indices
 
 
-class UltralyticsAdapter(BaseModelAdapter):
-    """Bộ điều hợp cho họ mô hình Ultralytics: YOLOv26X, YOLOv11, RTDETR-L, RFDETF-Medium."""
-    def __init__(self, weights_path: str, name_to_cat_id: Dict[str, int], device: str = "cuda:0", conf_thresh: float = 0.001, imgsz: int = 640):
+def normalize_coco_detection(
+    box_xyxy: Any,
+    score: float,
+    category_id: int,
+    image_width: int,
+    image_height: int,
+) -> Optional[Dict[str, Any]]:
+    """Clip one xyxy prediction to the source image and convert it to COCO xywh."""
+    xmin = max(0.0, min(float(image_width), float(box_xyxy[0])))
+    ymin = max(0.0, min(float(image_height), float(box_xyxy[1])))
+    xmax = max(0.0, min(float(image_width), float(box_xyxy[2])))
+    ymax = max(0.0, min(float(image_height), float(box_xyxy[3])))
+    width = xmax - xmin
+    height = ymax - ymin
+    if width <= 1.0 or height <= 1.0:
+        return None
+    return {
+        "bbox": [xmin, ymin, width, height],
+        "score": float(score),
+        "category_id": int(category_id),
+    }
+
+
+class UltralyticsAdapter:
+    """Bộ điều hợp cho YOLO và RT-DETR thuộc Ultralytics."""
+    def __init__(
+        self,
+        model_cfg: Dict[str, Any],
+        weights_path: str,
+        name_to_cat_id: Dict[str, int],
+        device: str = "cuda:0",
+        conf_thresh: float = 0.001,
+        imgsz: int = 640,
+        max_detections: int = 100,
+    ):
         self.device = device
         self.conf_thresh = conf_thresh
         self.imgsz = imgsz
-        self.name_to_cat_id = name_to_cat_id
+        self.max_detections = max_detections
+        self.nms_iou_threshold = model_cfg.get("nms_iou_threshold")
 
-        try:
-            from ultralytics import YOLO
-            self.model = YOLO(weights_path)
-        except Exception:
+        model_type = str(model_cfg.get("model_type", "yolo")).lower()
+        if model_type == "rtdetr":
             from ultralytics import RTDETR
             self.model = RTDETR(weights_path)
+        elif model_type == "yolo":
+            from ultralytics import YOLO
+            self.model = YOLO(weights_path)
+        else:
+            raise ValueError(f"model_type Ultralytics không được hỗ trợ: {model_type}")
 
-        self.names = getattr(self.model, "names", {})
-        if isinstance(self.names, list):
-            self.names = {i: n for i, n in enumerate(self.names)}
+        checkpoint_names = getattr(self.model, "names", {})
+        if isinstance(checkpoint_names, list):
+            checkpoint_names = {i: str(name) for i, name in enumerate(checkpoint_names)}
+        else:
+            checkpoint_names = {int(index): str(name) for index, name in checkpoint_names.items()}
+        self.class_idx_to_cat_id, self.ignored_class_indices = build_class_mapping(
+            checkpoint_names, name_to_cat_id, model_cfg, "Ultralytics"
+        )
 
     def predict_image(self, image_bgr: np.ndarray, orig_w: int, orig_h: int) -> List[Dict[str, Any]]:
-        res = self.model.predict(source=image_bgr, conf=self.conf_thresh, imgsz=self.imgsz, device=self.device, verbose=False)[0]
+        predict_kwargs = {
+            "source": image_bgr,
+            "conf": self.conf_thresh,
+            "imgsz": self.imgsz,
+            "device": self.device,
+            "verbose": False,
+            "max_det": self.max_detections,
+        }
+        if self.nms_iou_threshold is not None:
+            predict_kwargs["iou"] = float(self.nms_iou_threshold)
+        res = self.model.predict(**predict_kwargs)[0]
         detections = []
 
         if res.boxes is not None and len(res.boxes) > 0:
@@ -319,81 +483,117 @@ class UltralyticsAdapter(BaseModelAdapter):
             classes = res.boxes.cls.cpu().numpy().astype(int)
 
             for box, score, cls_idx in zip(boxes, scores, classes):
-                xmin = max(0.0, min(float(orig_w), float(box[0])))
-                ymin = max(0.0, min(float(orig_h), float(box[1])))
-                xmax = max(0.0, min(float(orig_w), float(box[2])))
-                ymax = max(0.0, min(float(orig_h), float(box[3])))
-                w = max(0.0, xmax - xmin)
-                h = max(0.0, ymax - ymin)
-
-                if w <= 1.0 or h <= 1.0:
+                if cls_idx in self.ignored_class_indices:
                     continue
-
-                class_name = self.names.get(cls_idx, f"Class_{cls_idx}")
-                coco_cat_id = self.name_to_cat_id.get(class_name, cls_idx + 1)
-
-                detections.append({
-                    "bbox": [round(xmin, 2), round(ymin, 2), round(w, 2), round(h, 2)],
-                    "score": round(float(score), 5),
-                    "category_id": int(coco_cat_id),
-                    "class_name": class_name,
-                    "xyxy": [xmin, ymin, xmax, ymax]
-                })
+                if cls_idx not in self.class_idx_to_cat_id:
+                    raise ValueError(f"Không ánh xạ được class index {cls_idx} của checkpoint Ultralytics")
+                detection = normalize_coco_detection(
+                    box, score, self.class_idx_to_cat_id[cls_idx], orig_w, orig_h
+                )
+                if detection is not None:
+                    detections.append(detection)
         return detections
 
     def get_torch_module(self):
         return self.model.model
 
 
-class TorchvisionAdapter(BaseModelAdapter):
+class TorchvisionAdapter:
     """Bộ điều hợp cho họ mô hình Torchvision: Faster R-CNN, FCOS, RetinaNet."""
-    def __init__(self, model_type: str, weights_path: str, class_names: List[str], name_to_cat_id: Dict[str, int], device: str = "cuda:0", conf_thresh: float = 0.001, imgsz: int = 640):
+    def __init__(
+        self,
+        model_cfg: Dict[str, Any],
+        weights_path: str,
+        class_names: List[str],
+        name_to_cat_id: Dict[str, int],
+        device: str = "cuda:0",
+        conf_thresh: float = 0.001,
+        imgsz: int = 640,
+        max_detections: int = 100,
+    ):
         import torch
-        import torchvision
-        from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2, fcos_resnet50_fpn, retinanet_resnet50_fpn
-        from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+        from torchvision.models.detection import (
+            fasterrcnn_resnet50_fpn,
+            fasterrcnn_resnet50_fpn_v2,
+            fasterrcnn_mobilenet_v3_large_320_fpn,
+            fasterrcnn_mobilenet_v3_large_fpn,
+            fcos_resnet50_fpn,
+            retinanet_resnet50_fpn,
+            retinanet_resnet50_fpn_v2,
+        )
 
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.conf_thresh = conf_thresh
         self.imgsz = imgsz
-        self.class_names = class_names
-        self.name_to_cat_id = name_to_cat_id
-        num_classes_with_bg = len(class_names) + 1  # 32 classes + 1 background = 33
+        self.max_detections = max_detections
+        self.label_offset = int(model_cfg.get("label_offset", 1))
+        self.checkpoint_classes = model_cfg.get("checkpoint_classes") or class_names
+        indexed_names = {index: name for index, name in enumerate(self.checkpoint_classes)}
+        self.class_idx_to_cat_id, self.ignored_class_indices = build_class_mapping(
+            indexed_names, name_to_cat_id, model_cfg, "Torchvision"
+        )
+        num_model_classes = len(self.checkpoint_classes) + self.label_offset
+        model_type = str(model_cfg["model_type"])
+        kwargs = dict(model_cfg.get("constructor_kwargs", {}))
+        kwargs.setdefault("min_size", int(imgsz))
+        kwargs.setdefault("max_size", int(imgsz))
 
         ckpt = torch.load(weights_path, map_location=self.device)
-        state_dict = ckpt.get("model_state_dict", ckpt.get("model", ckpt))
+        state_dict = ckpt.get("model_state_dict", ckpt.get("state_dict", ckpt.get("model", ckpt)))
+        for prefix in ("module.", "model."):
+            if state_dict and all(str(key).startswith(prefix) for key in state_dict):
+                state_dict = {str(key)[len(prefix):]: value for key, value in state_dict.items()}
 
-        if model_type == "fasterrcnn_resnet50_fpn_v2":
-            self.model = fasterrcnn_resnet50_fpn_v2(weights=None)
-            in_features = self.model.roi_heads.box_predictor.cls_score.in_features
-            self.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes_with_bg)
-            self.model.load_state_dict(state_dict)
-        elif model_type == "fasterrcnn_mobilenet_v3_large_fpn":
-            try:
-                from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn
-                self.model = fasterrcnn_mobilenet_v3_large_fpn(weights=None)
-            except Exception:
-                from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_320_fpn
-                self.model = fasterrcnn_mobilenet_v3_large_320_fpn(weights=None)
-            in_features = self.model.roi_heads.box_predictor.cls_score.in_features
-            self.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes_with_bg)
-            self.model.load_state_dict(state_dict)
+        if model_type in {"fasterrcnn_resnet50_fpn", "fasterrcnn_resnet50_fpn_v2"}:
+            kwargs.setdefault("box_score_thresh", float(conf_thresh))
+            kwargs.setdefault("box_detections_per_img", int(max_detections))
+            constructor = (
+                fasterrcnn_resnet50_fpn_v2
+                if model_type.endswith("_v2")
+                else fasterrcnn_resnet50_fpn
+            )
+            self.model = constructor(
+                weights=None, weights_backbone=None, num_classes=num_model_classes, **kwargs
+            )
+        elif model_type in {
+            "fasterrcnn_mobilenet_v3_large_fpn",
+            "fasterrcnn_mobilenet_v3_large_320_fpn",
+        }:
+            constructor = (
+                fasterrcnn_mobilenet_v3_large_320_fpn
+                if model_type.endswith("_320_fpn")
+                else fasterrcnn_mobilenet_v3_large_fpn
+            )
+            kwargs.setdefault("box_score_thresh", float(conf_thresh))
+            kwargs.setdefault("box_detections_per_img", int(max_detections))
+            self.model = constructor(weights=None, weights_backbone=None, num_classes=num_model_classes, **kwargs)
         elif model_type == "fcos_resnet50_fpn":
-            try:
-                self.model = fcos_resnet50_fpn(weights=None, num_classes=num_classes_with_bg)
-                self.model.load_state_dict(state_dict)
-            except Exception:
-                self.model = fcos_resnet50_fpn(weights=None, num_classes=len(class_names))
-                self.model.load_state_dict(state_dict)
-        elif model_type == "retinanet_resnet50_fpn":
-            try:
-                self.model = retinanet_resnet50_fpn(weights=None, num_classes=num_classes_with_bg)
-                self.model.load_state_dict(state_dict)
-            except Exception:
-                self.model = retinanet_resnet50_fpn(weights=None, num_classes=len(class_names))
-                self.model.load_state_dict(state_dict)
+            kwargs.setdefault("score_thresh", float(conf_thresh))
+            kwargs.setdefault("detections_per_img", int(max_detections))
+            self.model = fcos_resnet50_fpn(
+                weights=None, weights_backbone=None, num_classes=num_model_classes, **kwargs
+            )
+        elif model_type in {"retinanet_resnet50_fpn", "retinanet_resnet50_fpn_v2"}:
+            kwargs.setdefault("score_thresh", float(conf_thresh))
+            kwargs.setdefault("detections_per_img", int(max_detections))
+            constructor = (
+                retinanet_resnet50_fpn_v2
+                if model_type.endswith("_v2")
+                else retinanet_resnet50_fpn
+            )
+            self.model = constructor(
+                weights=None, weights_backbone=None, num_classes=num_model_classes, **kwargs
+            )
         else:
             raise ValueError(f"Không hỗ trợ kiến trúc Torchvision: {model_type}")
+
+        try:
+            self.model.load_state_dict(state_dict, strict=True)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Checkpoint không tương thích kiến trúc {model_type} với label_offset={self.label_offset}. "
+                "Không được fallback sang kiến trúc/số lớp khác vì sẽ làm sai benchmark."
+            ) from exc
 
         self.model.to(self.device)
         self.model.eval()
@@ -402,11 +602,9 @@ class TorchvisionAdapter(BaseModelAdapter):
         import torch
 
         img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        img_resized = cv2.resize(img_rgb, (self.imgsz, self.imgsz))
-        img_tensor = torch.as_tensor(img_resized, dtype=torch.float32).permute(2, 0, 1) / 255.0
-
-        scale_x = orig_w / float(self.imgsz)
-        scale_y = orig_h / float(self.imgsz)
+        # Không resize thủ công: GeneralizedRCNNTransform của model thực hiện đúng
+        # min_size/max_size đã khai báo trong constructor_kwargs.
+        img_tensor = torch.as_tensor(img_rgb, dtype=torch.float32).permute(2, 0, 1) / 255.0
 
         with torch.no_grad():
             output = self.model([img_tensor.to(self.device)])[0]
@@ -416,36 +614,93 @@ class TorchvisionAdapter(BaseModelAdapter):
         scores = output["scores"].cpu().numpy()
         labels = output["labels"].cpu().numpy()
 
-        for box, score, label in zip(boxes, scores, labels):
+        order = np.argsort(-scores)[: self.max_detections]
+        for box, score, label in zip(boxes[order], scores[order], labels[order]):
             lbl = int(label)
-            if lbl == 0 or score < self.conf_thresh:  # Bỏ qua background class (0)
+            cls_idx = lbl - self.label_offset
+            if score < self.conf_thresh:
                 continue
-
-            xmin = max(0.0, min(float(orig_w), float(box[0]) * scale_x))
-            ymin = max(0.0, min(float(orig_h), float(box[1]) * scale_y))
-            xmax = max(0.0, min(float(orig_w), float(box[2]) * scale_x))
-            ymax = max(0.0, min(float(orig_h), float(box[3]) * scale_y))
-            w = max(0.0, xmax - xmin)
-            h = max(0.0, ymax - ymin)
-
-            if w <= 1.0 or h <= 1.0:
+            if not 0 <= cls_idx < len(self.checkpoint_classes):
+                raise ValueError(
+                    f"Label {lbl} is invalid for label_offset={self.label_offset} "
+                    f"and {len(self.checkpoint_classes)} checkpoint classes"
+                )
+            if cls_idx in self.ignored_class_indices:
                 continue
+            if cls_idx not in self.class_idx_to_cat_id:
+                raise ValueError(f"Checkpoint class index {cls_idx} has no COCO mapping")
 
-            cls_idx = lbl - 1
-            class_name = self.class_names[cls_idx] if 0 <= cls_idx < len(self.class_names) else f"Class_{lbl}"
-            coco_cat_id = self.name_to_cat_id.get(class_name, lbl)
-
-            detections.append({
-                "bbox": [round(xmin, 2), round(ymin, 2), round(w, 2), round(h, 2)],
-                "score": round(float(score), 5),
-                "category_id": int(coco_cat_id),
-                "class_name": class_name,
-                "xyxy": [xmin, ymin, xmax, ymax]
-            })
+            detection = normalize_coco_detection(
+                box, score, self.class_idx_to_cat_id[cls_idx], orig_w, orig_h
+            )
+            if detection is not None:
+                detections.append(detection)
         return detections
 
     def get_torch_module(self):
         return self.model
+
+
+class RFDETRAdapter:
+    """Bộ điều hợp riêng cho package RF-DETR của Roboflow (không phải Ultralytics RT-DETR)."""
+    def __init__(
+        self,
+        model_cfg: Dict[str, Any],
+        weights_path: str,
+        class_names: List[str],
+        name_to_cat_id: Dict[str, int],
+        device: str = "cuda:0",
+        conf_thresh: float = 0.001,
+        imgsz: int = 640,
+        max_detections: int = 100,
+    ):
+        import rfdetr
+
+        self.conf_thresh = conf_thresh
+        self.max_detections = max_detections
+        self.label_offset = int(model_cfg.get("label_offset", 0))
+        self.checkpoint_classes = model_cfg.get("checkpoint_classes") or class_names
+        indexed_names = {index: name for index, name in enumerate(self.checkpoint_classes)}
+        self.class_idx_to_cat_id, self.ignored_class_indices = build_class_mapping(
+            indexed_names, name_to_cat_id, model_cfg, "RF-DETR"
+        )
+        model_class_name = model_cfg.get("model_class", "RFDETRMedium")
+        model_class = getattr(rfdetr, model_class_name, None)
+        if model_class is None:
+            raise ValueError(f"Không tìm thấy class {model_class_name} trong package rfdetr")
+
+        self.model = model_class.from_checkpoint(weights_path, device=device)
+        self.imgsz = int(getattr(getattr(self.model, "model_config", None), "resolution", imgsz))
+
+    def predict_image(self, image_bgr: np.ndarray, orig_w: int, orig_h: int) -> List[Dict[str, Any]]:
+        from PIL import Image
+
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        output = self.model.predict(Image.fromarray(image_rgb), threshold=self.conf_thresh)
+        if not hasattr(output, "xyxy"):
+            raise TypeError("RF-DETR predict() không trả về supervision.Detections như mong đợi")
+        boxes = np.asarray(output.xyxy)
+        scores = np.asarray(output.confidence)
+        labels = np.asarray(output.class_id).astype(int)
+        order = np.argsort(-scores)[: self.max_detections]
+        detections = []
+        for box, score, raw_label in zip(boxes[order], scores[order], labels[order]):
+            cls_idx = int(raw_label) - self.label_offset
+            if not 0 <= cls_idx < len(self.checkpoint_classes):
+                raise ValueError(f"RF-DETR label {raw_label} is outside configured checkpoint classes")
+            if cls_idx in self.ignored_class_indices:
+                continue
+            if cls_idx not in self.class_idx_to_cat_id:
+                raise ValueError(f"RF-DETR class index {cls_idx} has no COCO mapping")
+            detection = normalize_coco_detection(
+                box, score, self.class_idx_to_cat_id[cls_idx], orig_w, orig_h
+            )
+            if detection is not None:
+                detections.append(detection)
+        return detections
+
+    def get_torch_module(self):
+        return self.model.model if hasattr(self.model, "model") else self.model
 
 
 # ==============================================================================
@@ -455,56 +710,69 @@ class BenchmarkEngine:
     """Đo đạc 4 thông số: GFLOPs, Parameters, Latency và FPS."""
 
     @staticmethod
-    def measure_complexity(adapter: BaseModelAdapter, device: str = "cuda:0", imgsz: int = 640) -> Tuple[float, float]:
+    def measure_complexity(
+        adapter: Any, device: str = "cuda:0", imgsz: int = 640
+    ) -> Tuple[Optional[float], float]:
         import torch
         torch_model = adapter.get_torch_module()
-        torch_model.eval().to(device)
+        effective_device = torch.device(
+            device if not str(device).startswith("cuda") or torch.cuda.is_available() else "cpu"
+        )
+        torch_model.eval().to(effective_device)
 
         gflops = 0.0
         params_m = 0.0
         try:
             from thop import profile
-            dummy = torch.randn(1, 3, imgsz, imgsz).to(device)
+            dummy = torch.randn(1, 3, imgsz, imgsz).to(effective_device)
             try:
                 flops, params = profile(torch_model, inputs=(dummy,), verbose=False)
             except Exception:
                 flops, params = profile(torch_model, inputs=([dummy[0]],), verbose=False)
             gflops = round(flops / 1e9, 2)
             params_m = round(params / 1e6, 2)
-        except Exception:
+        except Exception as exc:
             params_count = sum(p.numel() for p in torch_model.parameters())
             params_m = round(params_count / 1e6, 2)
-            gflops = round(params_m * 2.2, 2)
+            gflops = None
+            print(f"  [WARNING] GFLOPs unavailable (THOP profiling failed): {exc}")
 
         return gflops, params_m
 
     @staticmethod
-    def measure_latency_and_fps(adapter: BaseModelAdapter, test_image_paths: List[str], device: str = "cuda:0", warmup: int = 10) -> Tuple[float, float]:
+    def measure_latency_and_fps(adapter: Any, test_image_paths: List[str], device: str = "cuda:0", warmup: int = 10) -> Tuple[float, float]:
         import torch
         total_images = len(test_image_paths)
         if total_images == 0:
             return 0.0, 0.0
+        use_cuda = torch.cuda.is_available() and str(device).startswith("cuda")
 
         for i in range(min(warmup, total_images)):
             img = cv2.imread(test_image_paths[i])
-            if img is not None:
-                _ = adapter.predict_image(img, img.shape[1], img.shape[0])
+            if img is None:
+                raise RuntimeError(f"Cannot decode benchmark image: {test_image_paths[i]}")
+            adapter.predict_image(img, img.shape[1], img.shape[0])
 
-        if torch.cuda.is_available():
+        if use_cuda:
             torch.cuda.synchronize()
 
-        start_time = time.perf_counter()
+        elapsed = 0.0
+        measured_images = 0
         for p in test_image_paths:
             img = cv2.imread(p)
-            if img is not None:
-                _ = adapter.predict_image(img, img.shape[1], img.shape[0])
+            if img is None:
+                raise RuntimeError(f"Cannot decode benchmark image: {p}")
+            if use_cuda:
+                torch.cuda.synchronize()
+            start_time = time.perf_counter()
+            adapter.predict_image(img, img.shape[1], img.shape[0])
+            if use_cuda:
+                torch.cuda.synchronize()
+            elapsed += time.perf_counter() - start_time
+            measured_images += 1
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-
-        elapsed = time.perf_counter() - start_time
-        latency_ms = round((elapsed / total_images) * 1000, 2)
-        fps = round(total_images / elapsed, 2)
+        latency_ms = round((elapsed / measured_images) * 1000, 2)
+        fps = round(measured_images / elapsed, 2) if elapsed > 0 else 0.0
         return latency_ms, fps
 
 
@@ -515,30 +783,157 @@ class COCOBenchmarkEvaluator:
     """Đánh giá toàn diện bằng pycocotools COCOeval trên đúng 32 lớp nguyên liệu."""
 
     @staticmethod
-    def evaluate(coco_gt, predictions_list: List[Dict[str, Any]], valid_cat_ids: List[int]) -> Dict[str, Any]:
+    def _operating_point_from_cocoeval(
+        coco_eval,
+        coco_gt,
+        score_threshold: float,
+        iou_threshold: float,
+    ) -> Dict[str, Any]:
+        """Derive raw P/R/F1 from COCOeval matches, including COCO ignore/crowd rules."""
+        iou_indexes = np.flatnonzero(np.isclose(coco_eval.params.iouThrs, iou_threshold))
+        if len(iou_indexes) != 1:
+            raise ValueError(
+                f"Operating IoU {iou_threshold} is not in COCOeval iouThrs="
+                f"{coco_eval.params.iouThrs.tolist()}"
+            )
+        iou_index = int(iou_indexes[0])
+        area_all = list(coco_eval.params.areaRng[0])
+        max_det = int(coco_eval.params.maxDets[-1])
+        counts = {
+            int(cat_id): {"TP": 0, "FP": 0, "FN": 0}
+            for cat_id in coco_eval.params.catIds
+        }
+
+        for eval_image in coco_eval.evalImgs:
+            if eval_image is None:
+                continue
+            if list(eval_image["aRng"]) != area_all or int(eval_image["maxDet"]) != max_det:
+                continue
+
+            cat_id = int(eval_image["category_id"])
+            if cat_id not in counts:
+                continue
+            scores = np.asarray(eval_image["dtScores"], dtype=np.float64)
+            selected = scores >= score_threshold
+            matches = np.asarray(eval_image["dtMatches"])[iou_index, selected]
+            ignored_detections = np.asarray(eval_image["dtIgnore"])[iou_index, selected].astype(bool)
+            valid_detections = ~ignored_detections
+            true_positive_mask = (matches > 0) & valid_detections
+            false_positive_mask = (matches == 0) & valid_detections
+
+            valid_ground_truth = int(
+                np.count_nonzero(~np.asarray(eval_image["gtIgnore"], dtype=bool))
+            )
+            matched_ground_truth_ids = {
+                int(gt_id) for gt_id in matches[true_positive_mask] if int(gt_id) > 0
+            }
+            counts[cat_id]["TP"] += len(matched_ground_truth_ids)
+            counts[cat_id]["FP"] += int(np.count_nonzero(false_positive_mask))
+            counts[cat_id]["FN"] += max(0, valid_ground_truth - len(matched_ground_truth_ids))
+
+        per_class = {}
+        for cat_id, cls_counts in counts.items():
+            tp, fp, fn = cls_counts["TP"], cls_counts["FP"], cls_counts["FN"]
+            precision = tp / (tp + fp) if tp + fp else 0.0
+            recall = tp / (tp + fn) if tp + fn else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+            cat_name = coco_gt.loadCats(cat_id)[0]["name"]
+            per_class[cat_name] = {
+                "Precision": round(precision, 4),
+                "Recall": round(recall, 4),
+                "F1": round(f1, 4),
+                "TP": tp,
+                "FP": fp,
+                "FN": fn,
+            }
+
+        tp = sum(item["TP"] for item in counts.values())
+        fp = sum(item["FP"] for item in counts.values())
+        fn = sum(item["FN"] for item in counts.values())
+        precision = tp / (tp + fp) if tp + fp else 0.0
+        recall = tp / (tp + fn) if tp + fn else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        return {
+            "Precision": round(precision, 4),
+            "Recall": round(recall, 4),
+            "F1": round(f1, 4),
+            "TP": tp,
+            "FP": fp,
+            "FN": fn,
+            "score_threshold": score_threshold,
+            "iou_threshold": iou_threshold,
+            "source": "pycocotools.COCOeval.evalImgs",
+            "per_class": per_class,
+        }
+
+    @staticmethod
+    def evaluate(
+        coco_gt,
+        predictions_list: List[Dict[str, Any]],
+        valid_cat_ids: List[int],
+        image_ids: List[int],
+        max_detections: int = 100,
+        operating_score_threshold: float = 0.25,
+        operating_iou_threshold: float = 0.50,
+    ) -> Dict[str, Any]:
         from pycocotools.cocoeval import COCOeval
 
         if len(predictions_list) == 0:
-            return {"mAP50_95": 0.0, "mAP50": 0.0, "recall": 0.0, "precision": 0.0, "per_class": {}}
+            valid_images = set(int(image_id) for image_id in image_ids)
+            fn_by_cat = {int(cat_id): 0 for cat_id in valid_cat_ids}
+            for annotation in coco_gt.dataset.get("annotations", []):
+                cat_id = int(annotation["category_id"])
+                if (
+                    cat_id in fn_by_cat
+                    and int(annotation["image_id"]) in valid_images
+                    and int(annotation.get("iscrowd", 0)) == 0
+                    and int(annotation.get("ignore", 0)) == 0
+                ):
+                    fn_by_cat[cat_id] += 1
+            empty_per_class = {
+                coco_gt.loadCats(cat_id)[0]["name"]: {
+                    "Precision": 0.0, "Recall": 0.0, "F1": 0.0,
+                    "TP": 0, "FP": 0, "FN": fn_by_cat[int(cat_id)],
+                    "mAP50": 0.0, "mAP50-95": 0.0, "AR100": 0.0,
+                }
+                for cat_id in valid_cat_ids
+            }
+            total_fn = sum(fn_by_cat.values())
+            return {
+                "Precision": 0.0, "Recall": 0.0, "F1": 0.0,
+                "mAP50_95": 0.0, "mAP50": 0.0, "mAP75": 0.0,
+                "AP_small": 0.0, "AP_medium": 0.0, "AP_large": 0.0,
+                "AR1": 0.0, "AR10": 0.0, "AR100": 0.0,
+                "operating_point": {
+                    "TP": 0, "FP": 0, "FN": total_fn,
+                    "score_threshold": operating_score_threshold,
+                    "iou_threshold": operating_iou_threshold,
+                    "source": "pycocotools-compatible empty detections",
+                },
+                "per_class": empty_per_class,
+            }
 
         coco_dt = coco_gt.loadRes(predictions_list)
         coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
         coco_eval.params.catIds = valid_cat_ids
+        coco_eval.params.imgIds = sorted(image_ids)
+        # Giữ giao thức COCO chuẩn; maxDets cuối là giá trị dùng cho AP/AR chính.
+        coco_eval.params.maxDets = [1, 10, int(max_detections)]
         coco_eval.evaluate()
         coco_eval.accumulate()
         coco_eval.summarize()
 
+        operating_metrics = COCOBenchmarkEvaluator._operating_point_from_cocoeval(
+            coco_eval,
+            coco_gt,
+            score_threshold=operating_score_threshold,
+            iou_threshold=operating_iou_threshold,
+        )
+
         stats = coco_eval.stats
         map50_95 = float(stats[0])
         map50 = float(stats[1])
-        recall_ar100 = float(stats[8])
-
-        try:
-            prec_iou50 = coco_eval.eval["precision"][0, :, :, 0, 2]
-            valid_p = prec_iou50[prec_iou50 > -1]
-            precision_val = float(np.mean(valid_p)) if len(valid_p) > 0 else map50
-        except Exception:
-            precision_val = map50
+        map75 = float(stats[2])
 
         per_class_metrics = {}
         for idx_k, cat_id in enumerate(coco_eval.params.catIds):
@@ -553,126 +948,180 @@ class COCOBenchmarkEvaluator:
 
             r_cls = coco_eval.eval["recall"][:, idx_k, 0, 2]
             v_r = r_cls[r_cls > -1]
-            cls_recall = float(np.mean(v_r)) if len(v_r) > 0 else 0.0
+            cls_ar100 = float(np.mean(v_r)) if len(v_r) > 0 else 0.0
 
             per_class_metrics[cat_name] = {
-                "Precision": round(cls_map50, 4),
-                "Recall": round(cls_recall, 4),
+                "Precision": operating_metrics["per_class"][cat_name]["Precision"],
+                "Recall": operating_metrics["per_class"][cat_name]["Recall"],
+                "F1": operating_metrics["per_class"][cat_name]["F1"],
+                "TP": operating_metrics["per_class"][cat_name]["TP"],
+                "FP": operating_metrics["per_class"][cat_name]["FP"],
+                "FN": operating_metrics["per_class"][cat_name]["FN"],
                 "mAP50": round(cls_map50, 4),
-                "mAP50-95": round(cls_map50_95, 4)
+                "mAP50-95": round(cls_map50_95, 4),
+                "AR100": round(cls_ar100, 4),
             }
 
         return {
+            "Precision": operating_metrics["Precision"],
+            "Recall": operating_metrics["Recall"],
+            "F1": operating_metrics["F1"],
             "mAP50_95": round(map50_95, 4),
             "mAP50": round(map50, 4),
-            "recall": round(recall_ar100, 4),
-            "precision": round(precision_val, 4),
+            "mAP75": round(map75, 4),
+            "AP_small": round(float(stats[3]), 4),
+            "AP_medium": round(float(stats[4]), 4),
+            "AP_large": round(float(stats[5]), 4),
+            "AR1": round(float(stats[6]), 4),
+            "AR10": round(float(stats[7]), 4),
+            "AR100": round(float(stats[8]), 4),
+            "operating_point": {
+                key: operating_metrics[key]
+                for key in ("TP", "FP", "FN", "score_threshold", "iou_threshold", "source")
+            },
             "per_class": per_class_metrics
         }
 
 
 class ConfusionMatrixEngine:
-    """Tạo Ma trận nhầm lẫn (Confusion Matrix) độ phân giải cao 300 DPI."""
+    """Vẽ ma trận C+1 lớp để phân tích lỗi; không dùng làm nguồn metric báo cáo."""
 
     @staticmethod
-    def generate(coco_gt, predictions_list: List[Dict[str, Any]], valid_categories: List[Dict[str, Any]], output_prefix: str):
+    def generate(
+        coco_gt,
+        predictions_list: List[Dict[str, Any]],
+        valid_categories: List[Dict[str, Any]],
+        output_prefix: str,
+        score_threshold: float,
+        iou_threshold: float,
+        max_detections: int,
+        chart_dpi: int = 300,
+    ) -> Dict[str, Any]:
         import matplotlib.pyplot as plt
         import seaborn as sns
 
         cat_id_to_idx = {c["id"]: i for i, c in enumerate(valid_categories)}
         class_names = [c["name"] for c in valid_categories]
         num_classes = len(valid_categories)
-        cm = np.zeros((num_classes, num_classes), dtype=np.int64)
+        bg_idx = num_classes
+        cm = np.zeros((num_classes + 1, num_classes + 1), dtype=np.int64)
 
-        gt_by_img = {}
+        image_ids = sorted(coco_gt.getImgIds())
+        gt_by_img = {img_id: [] for img_id in image_ids}
         for ann in coco_gt.dataset.get("annotations", []):
             img_id = ann["image_id"]
-            if ann["category_id"] in cat_id_to_idx:
+            if ann["category_id"] in cat_id_to_idx and int(ann.get("iscrowd", 0)) == 0:
                 gt_by_img.setdefault(img_id, []).append({
                     "cat_id": ann["category_id"],
                     "box": [ann["bbox"][0], ann["bbox"][1], ann["bbox"][0] + ann["bbox"][2], ann["bbox"][1] + ann["bbox"][3]]
                 })
 
-        pred_by_img = {}
+        pred_by_img = {img_id: [] for img_id in image_ids}
         for p in predictions_list:
-            if p["score"] >= 0.25:
+            if p["category_id"] in cat_id_to_idx and p["score"] >= score_threshold:
                 pred_by_img.setdefault(p["image_id"], []).append(p)
 
-        for img_id, gt_boxes in gt_by_img.items():
-            preds = sorted(pred_by_img.get(img_id, []), key=lambda x: x["score"], reverse=True)
+        for img_id in image_ids:
+            gt_boxes = gt_by_img.get(img_id, [])
+            preds = sorted(pred_by_img.get(img_id, []), key=lambda x: x["score"], reverse=True)[:max_detections]
             matched_gt = set()
+            matched_pred = set()
+            candidate_pairs = []
 
-            for p in preds:
-                p_idx = cat_id_to_idx.get(p["category_id"])
-                if p_idx is None:
-                    continue
-
-                best_iou = 0.0
-                best_gt_i = -1
+            for p_i, p in enumerate(preds):
                 pb = [p["bbox"][0], p["bbox"][1], p["bbox"][0] + p["bbox"][2], p["bbox"][1] + p["bbox"][3]]
-
                 for g_i, g in enumerate(gt_boxes):
-                    if g_i in matched_gt:
-                        continue
                     gb = g["box"]
                     inter = max(0, min(pb[2], gb[2]) - max(pb[0], gb[0])) * max(0, min(pb[3], gb[3]) - max(pb[1], gb[1]))
                     union = (pb[2] - pb[0]) * (pb[3] - pb[1]) + (gb[2] - gb[0]) * (gb[3] - gb[1]) - inter
                     iou = inter / float(union + 1e-6)
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_gt_i = g_i
+                    if iou >= iou_threshold:
+                        candidate_pairs.append((iou, g_i, p_i))
 
-                if best_iou >= 0.50 and best_gt_i >= 0:
-                    matched_gt.add(best_gt_i)
-                    g_idx = cat_id_to_idx.get(gt_boxes[best_gt_i]["cat_id"])
-                    if g_idx is not None:
-                        cm[g_idx, p_idx] += 1
+            candidate_pairs.sort(key=lambda item: item[0], reverse=True)
+            for _, g_i, p_i in candidate_pairs:
+                if g_i in matched_gt or p_i in matched_pred:
+                    continue
+                matched_gt.add(g_i)
+                matched_pred.add(p_i)
+                true_idx = cat_id_to_idx[gt_boxes[g_i]["cat_id"]]
+                pred_idx = cat_id_to_idx[preds[p_i]["category_id"]]
+                cm[true_idx, pred_idx] += 1
 
-        pd.DataFrame(cm, index=class_names, columns=class_names).to_csv(f"{output_prefix}_confusion_matrix.csv", encoding="utf-8-sig")
+            for g_i, gt in enumerate(gt_boxes):
+                if g_i not in matched_gt:
+                    cm[cat_id_to_idx[gt["cat_id"]], bg_idx] += 1
+            for p_i, pred in enumerate(preds):
+                if p_i not in matched_pred:
+                    cm[bg_idx, cat_id_to_idx[pred["category_id"]]] += 1
+
+        labels = class_names + ["background"]
+        pd.DataFrame(cm, index=labels, columns=labels).to_csv(
+            f"{output_prefix}_confusion_matrix.csv", encoding="utf-8-sig"
+        )
 
         row_sums = cm.sum(axis=1, keepdims=True)
         with np.errstate(divide="ignore", invalid="ignore"):
             cm_norm = np.where(row_sums > 0, cm / row_sums, 0.0)
 
-        plt.figure(figsize=(24, 20), dpi=300)
+        plt.figure(figsize=(24, 20), dpi=chart_dpi)
         sns.set_theme(style="white")
-        sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", xticklabels=class_names, yticklabels=class_names, square=True, linewidths=0.5, linecolor="#e0e0e0", annot_kws={"size": 9, "weight": "bold"})
-        plt.title(f"Normalized Confusion Matrix (%) - {os.path.basename(output_prefix)}", fontsize=20, weight="bold", pad=20)
+        sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", xticklabels=labels, yticklabels=labels, square=True, linewidths=0.5, linecolor="#e0e0e0", annot_kws={"size": 8})
+        plt.title(
+            f"Normalized Confusion Matrix - {os.path.basename(output_prefix)} "
+            f"(conf={score_threshold:.3f}, IoU={iou_threshold:.2f})",
+            fontsize=18, weight="bold", pad=20,
+        )
         plt.xlabel("Predicted Label", fontsize=16, weight="bold", labelpad=15)
         plt.ylabel("True Label", fontsize=16, weight="bold", labelpad=15)
         plt.xticks(rotation=45, ha="right", fontsize=11, weight="bold")
         plt.yticks(rotation=0, fontsize=11, weight="bold")
         plt.tight_layout()
-        plt.savefig(f"{output_prefix}_confusion_matrix_normalized.png", dpi=300, bbox_inches="tight")
+        plt.savefig(f"{output_prefix}_confusion_matrix_normalized.png", dpi=chart_dpi, bbox_inches="tight")
         plt.close()
+
+        return {
+            "counts_csv": f"{output_prefix}_confusion_matrix.csv",
+            "normalized_png": f"{output_prefix}_confusion_matrix_normalized.png",
+            "source": "visualization_only",
+        }
 
 
 # ==============================================================================
 # PHẦN 6: XUẤT BÁO CÁO KHOA HỌC & TÍNH NĂNG GỘP KẾT QUẢ TOÀN ĐỘI (MASTER MERGE)
 # ==============================================================================
 class ScientificReportVisualizer:
-    """Xuất báo cáo 10 cột, biểu đồ 300 DPI và hỗ trợ gộp kết quả toàn đội."""
+    """Xuất bảng metric, biểu đồ cấu hình DPI và hỗ trợ gộp kết quả toàn đội."""
 
     @staticmethod
-    def generate_all_reports(results_list: List[Dict[str, Any]], valid_categories: List[Dict[str, Any]], output_dir: str):
+    def generate_all_reports(
+        results_list: List[Dict[str, Any]],
+        valid_categories: List[Dict[str, Any]],
+        output_dir: str,
+        chart_dpi: int = 300,
+    ):
         os.makedirs(output_dir, exist_ok=True)
         class_names = [c["name"] for c in valid_categories]
 
         # 1. BẢNG 10 THÔNG SỐ CHUẨN BẮT BUỘC
         summary_rows = []
         for r in results_list:
-            is_pending = "Chờ" in r.get("status", "") or float(r.get("mAP50", 0.0)) == 0.0
+            is_pending = "Chờ" in r.get("status", "")
             patience_val = r.get("Patience")
             patience_str = "-" if (patience_val is None or str(patience_val).strip() in ["", "null", "None"]) else str(patience_val)
+            gflops_value = r.get("GFLOPs")
 
             summary_rows.append({
                 "Mô hình": r["model_name"],
                 "Precision": "-" if is_pending else f"{float(r['Precision']):.4f}",
                 "Recall": "-" if is_pending else f"{float(r['Recall']):.4f}",
+                "F1": "-" if is_pending else f"{float(r.get('F1', 0.0)):.4f}",
                 "mAP@50": "-" if is_pending else f"{float(r['mAP50']):.4f}",
                 "mAP@50-95": "-" if is_pending else f"{float(r['mAP50_95']):.4f}",
+                "mAP@75": "-" if is_pending else f"{float(r.get('mAP75', 0.0)):.4f}",
+                "AR@100": "-" if is_pending else f"{float(r.get('AR100', 0.0)):.4f}",
                 "Patience": patience_str,
-                "GFLOPs": "-" if is_pending else f"{float(r['GFLOPs']):.2f}",
+                "GFLOPs": "-" if is_pending or gflops_value is None else f"{float(gflops_value):.2f}",
                 "Parameters": "-" if is_pending else f"{float(r['Parameters']):.2f}",
                 "Latency": "-" if is_pending else f"{float(r['Latency']):.2f}",
                 "FPS": "-" if is_pending else f"{float(r['FPS']):.2f}",
@@ -689,9 +1138,22 @@ class ScientificReportVisualizer:
             f.write("# BẢNG TỔNG HỢP SO SÁNH CÁC MÔ HÌNH OBJECT DETECTION (COCO BENCHMARK)\n\n")
             f.write(f"- **Đề tài**: Nghiên cứu khoa học - Nhận diện nguyên liệu nấu ăn (32 lớp)\n")
             f.write(f"- **Thời gian**: {time.strftime('%d/%m/%Y %H:%M:%S')}\n")
-            f.write(f"- **Chuẩn đánh giá**: pycocotools COCOeval, Test Split (1.481 ảnh), GPU NVIDIA A100\n\n")
+            first_protocol = next((r.get("protocol") for r in results_list if r.get("protocol")), None)
+            if first_protocol:
+                settings = first_protocol["settings"]
+                f.write(
+                    f"- **Chuẩn đánh giá**: pycocotools COCOeval, "
+                    f"{first_protocol['num_test_images']} ảnh, protocol `{first_protocol['protocol_id']}`\n"
+                )
+                f.write(
+                    f"- **P/R/F1**: suy ra từ COCOeval matches tại "
+                    f"conf={settings['operating_conf_threshold']}, "
+                    f"IoU={settings['operating_iou_threshold']}; các cột mAP/AR là COCO metrics.\n\n"
+                )
+            else:
+                f.write("- **Chuẩn đánh giá**: chưa có kết quả hoàn tất để xác định protocol.\n\n")
             f.write(summary_df.to_markdown(index=False))
-            f.write("\n\n*Ghi chú: Các chỉ số được đo lường chính thức theo chuẩn COCOeval và Test Batch Size = 1.*\n")
+            f.write("\n\n*Ghi chú: Không đồng nhất Precision/Recall tại một ngưỡng cố định với COCO AP/AR tích phân.*\n")
 
         # 3. BẢNG ĐỐI CHIẾU CHÉO 32 LỚP NGUYÊN LIỆU
         cross_rows = []
@@ -713,18 +1175,21 @@ class ScientificReportVisualizer:
             import matplotlib.pyplot as plt
             import seaborn as sns
 
-            evaluated = [r for r in results_list if float(r.get("mAP50", 0.0)) > 0.0]
+            evaluated = [r for r in results_list if "Chờ" not in r.get("status", "")]
             if len(evaluated) > 0:
                 m_names = [r["model_name"] for r in evaluated]
                 m_50 = [float(r["mAP50"]) * 100 for r in evaluated]
                 m_50_95 = [float(r["mAP50_95"]) * 100 for r in evaluated]
                 fps_list = [float(r["FPS"]) for r in evaluated]
-                gflops_list = [float(r["GFLOPs"]) for r in evaluated]
+                gflops_list = [
+                    float(r["GFLOPs"]) if r.get("GFLOPs") is not None else np.nan
+                    for r in evaluated
+                ]
                 params_list = [float(r["Parameters"]) for r in evaluated]
 
                 x = np.arange(len(m_names))
                 width = 0.35
-                plt.figure(figsize=(max(10, len(m_names) * 2), 7), dpi=300)
+                plt.figure(figsize=(max(10, len(m_names) * 2), 7), dpi=chart_dpi)
                 sns.set_theme(style="whitegrid")
                 plt.bar(x - width/2, m_50, width, label="mAP@50 (%)", color="#1f77b4")
                 plt.bar(x + width/2, m_50_95, width, label="mAP@50-95 (%)", color="#ff7f0e")
@@ -739,15 +1204,18 @@ class ScientificReportVisualizer:
                     plt.text(x[i] + width/2, m_50_95[i] + 1.2, f"{m_50_95[i]:.1f}%", ha="center", fontsize=9, weight="bold")
 
                 plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, "comparison_map_chart.png"), dpi=300)
+                plt.savefig(os.path.join(output_dir, "comparison_map_chart.png"), dpi=chart_dpi)
                 plt.close()
 
                 # Biểu đồ Trade-off Accuracy vs Speed
-                plt.figure(figsize=(12, 7), dpi=300)
+                plt.figure(figsize=(12, 7), dpi=chart_dpi)
                 bubble_sizes = [max(50, p * 15) for p in params_list]
-                scatter = plt.scatter(fps_list, m_50_95, s=bubble_sizes, c=gflops_list, cmap="plasma", alpha=0.85, edgecolors="black", linewidth=1.5)
-                cbar = plt.colorbar(scatter)
-                cbar.set_label("GFLOPs", fontsize=12, weight="bold")
+                if not all(np.isnan(v) for v in gflops_list):
+                    scatter = plt.scatter(fps_list, m_50_95, s=bubble_sizes, c=gflops_list, cmap="plasma", alpha=0.85, edgecolors="black", linewidth=1.5)
+                    cbar = plt.colorbar(scatter)
+                    cbar.set_label("GFLOPs", fontsize=12, weight="bold")
+                else:
+                    plt.scatter(fps_list, m_50_95, s=bubble_sizes, color="#1f77b4", alpha=0.85, edgecolors="black", linewidth=1.5)
 
                 for i, txt in enumerate(m_names):
                     plt.annotate(txt, (fps_list[i] + 0.5, m_50_95[i] + 0.3), fontsize=10, weight="bold")
@@ -756,7 +1224,7 @@ class ScientificReportVisualizer:
                 plt.ylabel("Độ chính xác mAP@50-95 (%) - Càng cao càng tốt", fontsize=13, weight="bold")
                 plt.title("Biểu đồ Trade-off: Accuracy vs Speed (Bóng biểu thị số tham số Params)", fontsize=15, weight="bold", pad=15)
                 plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, "comparison_tradeoff_chart.png"), dpi=300)
+                plt.savefig(os.path.join(output_dir, "comparison_tradeoff_chart.png"), dpi=chart_dpi)
                 plt.close()
 
         except Exception as e:
@@ -785,13 +1253,14 @@ def execute_common_coco_evaluation(
     - Mỗi mô hình sau khi đánh giá sẽ xuất một file result_<model>.json để đồng nghiệp gửi nộp.
     """
     os.makedirs(output_dir, exist_ok=True)
-    workspace_root = os.path.dirname(CURRENT_DIR)
 
     if config_data is None:
         if not os.path.exists(CONFIG_FILE):
             raise FileNotFoundError(f"[ERROR] Không tìm thấy tệp cấu hình tại {CONFIG_FILE}")
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             config_data = json.load(f)
+
+    validate_configuration(config_data)
 
     rf_info = config_data.get("roboflow", {})
     api_key = rf_info.get("api_key", "") or get_roboflow_api_key(config_data)
@@ -803,14 +1272,33 @@ def execute_common_coco_evaluation(
     bench_cfg = config_data.get("benchmark_settings", {})
     img_size = int(bench_cfg.get("imgsz", 640))
     conf_thresh = float(bench_cfg.get("conf_threshold", 0.001))
+    operating_conf_thresh = float(bench_cfg.get("operating_conf_threshold", 0.25))
+    operating_iou_thresh = float(bench_cfg.get("iou_threshold", 0.50))
+    max_detections = int(bench_cfg.get("max_detections", 100))
     warmup_n = int(bench_cfg.get("warmup_runs", 10))
     chart_dpi = int(bench_cfg.get("chart_dpi", 300))
-    fallback_classes = config_data.get("classes", [])
+    batch_size = int(bench_cfg.get("batch_size", 1))
+    configured_classes = config_data.get("classes", [])
+
+    if batch_size != 1:
+        raise ValueError("The current latency protocol requires benchmark_settings.batch_size = 1")
+    if not 0.0 <= conf_thresh <= operating_conf_thresh <= 1.0:
+        raise ValueError("Require 0 <= conf_threshold <= operating_conf_threshold <= 1")
+    if not 0.0 < operating_iou_thresh <= 1.0:
+        raise ValueError("iou_threshold must be in (0, 1]")
+    if max_detections != 100:
+        raise ValueError(
+            "common-coco-v3 requires max_detections = 100 because COCOeval.summarize() "
+            "defines the primary AP/AR statistics at maxDets=100"
+        )
 
     all_models_dict = config_data.get("models", {})
 
     # Lọc danh sách mô hình cần chạy trong phiên này
     if target_models:
+        unknown_models = sorted(set(target_models) - set(all_models_dict))
+        if unknown_models:
+            raise ValueError(f"Unknown model keys in --models: {unknown_models}")
         eval_queue = {k: v for k, v in all_models_dict.items() if k in target_models}
     else:
         # Mặc định chỉ chạy các mô hình có enabled: true (mô hình bạn phụ trách)
@@ -835,7 +1323,6 @@ def execute_common_coco_evaluation(
         project=project_name,
         version=version_num,
         dummy_cat_name=dummy_cat,
-        fallback_classes=fallback_classes
     )
     ds_manager.ensure_dataset(target_dir=dataset_dir)
     coco_gt, valid_categories, test_images = ds_manager.load_test_split()
@@ -845,16 +1332,52 @@ def execute_common_coco_evaluation(
     name_to_cat_id = ds_manager.name_to_cat_id
     test_image_paths = ds_manager.test_image_paths
 
+    expected_classes = int(bench_cfg.get("expected_num_classes", len(configured_classes) or 32))
+    expected_images = bench_cfg.get("expected_test_images")
+    if len(valid_categories) != expected_classes:
+        raise ValueError(
+            f"Expected {expected_classes} evaluated classes, found {len(valid_categories)} in test annotations"
+        )
+    if expected_images is not None and len(test_images) != int(expected_images):
+        raise ValueError(
+            f"Expected {int(expected_images)} test images, found {len(test_images)}. "
+            "Check the dataset version before comparing models."
+        )
+    if configured_classes and class_names != configured_classes:
+        raise ValueError(
+            "Class names/order in models_config.json do not exactly match the COCO test annotations"
+        )
+
+    runtime_device = describe_runtime_device(device)
+    protocol = build_protocol_metadata(
+        bench_cfg,
+        ds_manager.test_annotation_sha256,
+        list(test_images.keys()),
+        valid_categories,
+        runtime_device,
+    )
+    print(f"[PROTOCOL] {protocol['name']} / {protocol['protocol_id'][:12]}")
+
     results_list = []
 
-    for m_key, m_cfg in eval_queue.items():
+    for m_key, raw_model_cfg in eval_queue.items():
+        m_cfg = dict(raw_model_cfg)
+        m_cfg.setdefault(
+            "ignored_checkpoint_classes",
+            config_data.get("ignored_checkpoint_classes", []),
+        )
         disp_name = m_cfg.get("display_name", m_key)
         print("\n" + "-"*85)
         print(f"TIẾN HÀNH ĐÁNH GIÁ MÔ HÌNH: [{disp_name}]")
         print("-"*85)
 
         w_cloud = m_cfg.get("weights", "")
-        w_local = os.path.join(workspace_root, m_cfg.get("local_weights", "")) if m_cfg.get("local_weights") else ""
+        local_spec = m_cfg.get("local_weights", "")
+        w_local = (
+            local_spec
+            if local_spec and os.path.isabs(local_spec)
+            else os.path.join(CURRENT_DIR, local_spec) if local_spec else ""
+        )
         actual_weights = None
 
         if w_cloud and os.path.exists(w_cloud):
@@ -862,115 +1385,163 @@ def execute_common_coco_evaluation(
         elif w_local and os.path.exists(w_local):
             actual_weights = w_local
 
-        # Kiểm tra Verified Cache nếu chưa có file weights trực tiếp
+        # Chỉ nhận checkpoint thật; không nhập lại metric từ evaluator/cache cũ.
         if not actual_weights:
-            cached_dir = m_cfg.get("cached_report_dir", "")
-            cached_path = os.path.join(workspace_root, cached_dir) if cached_dir else ""
-            if cached_path and os.path.exists(cached_path):
-                bench_f = os.path.join(cached_path, f"{cached_dir}_performance_benchmark.json")
-                txt_f = os.path.join(cached_path, f"{cached_dir}_test_evaluation_report.txt")
-                if os.path.exists(bench_f) and os.path.exists(txt_f):
-                    with open(bench_f, "r", encoding="utf-8") as bf:
-                        bench_d = json.load(bf)
-
-                    print(f"  --> [NOTICE] Nạp kết quả đã kiểm chứng thành công từ Cache: {cached_dir}")
-                    is_yolo = "YOLO26" in cached_dir
-                    res_item = {
-                        "model_key": m_key,
-                        "model_name": disp_name,
-                        "Precision": 0.9726 if is_yolo else 0.9651,
-                        "Recall": 0.9749 if is_yolo else 0.8683,
-                        "mAP50": 0.9802 if is_yolo else 0.9651,
-                        "mAP50_95": 0.8749 if is_yolo else 0.8159,
-                        "Patience": m_cfg.get("patience", 10),
-                        "GFLOPs": float(bench_d.get("gflops", 104.46 if is_yolo else 280.95)),
-                        "Parameters": float(bench_d.get("parameters_m", 58.88 if is_yolo else 43.42)),
-                        "Latency": float(bench_d.get("latency_ms_per_image", 36.21 if is_yolo else 25.47)),
-                        "FPS": float(bench_d.get("fps", 27.62 if is_yolo else 39.27)),
-                        "status": "Hoàn tất (Verified Cache)",
-                        "per_class": {}
-                    }
-                    results_list.append(res_item)
-
-                    # Lưu file kết quả độc lập cho mô hình này
-                    with open(os.path.join(output_dir, f"result_{m_key}.json"), "w", encoding="utf-8") as rf:
-                        json.dump(res_item, rf, ensure_ascii=False, indent=2)
-                    continue
-
-            print(f"  --> [ERROR] Chưa tìm thấy file weights cho '{disp_name}' tại '{w_cloud}' hoặc '{w_local}'.")
+            print(
+                f"  --> [ERROR] Missing weights for '{disp_name}'. "
+                "Cached metrics are not accepted because they cannot prove the same evaluation protocol."
+            )
             continue
 
         print(f"  [MODEL] Khởi tạo mô hình từ: {actual_weights}")
+        model_img_size = int(m_cfg.get("imgsz", img_size))
 
         # Khởi tạo Adapter
         if m_cfg["family"] == "ultralytics":
-            adapter = UltralyticsAdapter(actual_weights, name_to_cat_id=name_to_cat_id, device=device, conf_thresh=conf_thresh, imgsz=img_size)
+            adapter = UltralyticsAdapter(
+                m_cfg, actual_weights, name_to_cat_id,
+                device=device, conf_thresh=conf_thresh, imgsz=model_img_size,
+                max_detections=max_detections,
+            )
         elif m_cfg["family"] == "torchvision":
-            adapter = TorchvisionAdapter(m_cfg["model_type"], actual_weights, class_names=class_names, name_to_cat_id=name_to_cat_id, device=device, conf_thresh=conf_thresh, imgsz=img_size)
+            adapter = TorchvisionAdapter(
+                m_cfg, actual_weights, class_names, name_to_cat_id,
+                device=device, conf_thresh=conf_thresh, imgsz=model_img_size,
+                max_detections=max_detections,
+            )
+        elif m_cfg["family"] == "rfdetr":
+            adapter = RFDETRAdapter(
+                m_cfg, actual_weights, class_names, name_to_cat_id,
+                device=device, conf_thresh=conf_thresh, imgsz=model_img_size,
+                max_detections=max_detections,
+            )
         else:
-            continue
+            raise ValueError(f"Unsupported model family: {m_cfg['family']}")
+        effective_img_size = int(getattr(adapter, "imgsz", model_img_size))
+        if effective_img_size != model_img_size:
+            raise ValueError(
+                f"Configured imgsz={model_img_size} for {m_key}, but checkpoint reports "
+                f"resolution={effective_img_size}. Update models_config.json to the trained resolution."
+            )
 
         # 1. Đo GFLOPs và Parameters
         print("  [BENCHMARK] Đo GFLOPs và Parameters...")
-        gflops, params_m = BenchmarkEngine.measure_complexity(adapter, device=device, imgsz=img_size)
+        gflops, params_m = BenchmarkEngine.measure_complexity(
+            adapter, device=device, imgsz=effective_img_size
+        )
 
         # 2. Đo Latency và FPS
         print("  [BENCHMARK] Đo Latency & FPS...")
         latency_ms, fps = BenchmarkEngine.measure_latency_and_fps(adapter, test_image_paths, device=device, warmup=warmup_n)
 
         # 3. Thu thập dự đoán COCO
-        print("  [INFERENCE] Đang suy luận trên 1.481 ảnh test...")
+        print(f"  [INFERENCE] Đang suy luận trên {len(test_images)} ảnh test...")
         coco_predictions = []
         for img_id, info in test_images.items():
             img_mat = cv2.imread(info["path"])
-            if img_mat is not None:
-                preds = adapter.predict_image(img_mat, info["width"], info["height"])
-                for p in preds:
-                    coco_predictions.append({
-                        "image_id": int(img_id),
-                        "category_id": int(p["category_id"]),
-                        "bbox": p["bbox"],
-                        "score": float(p["score"])
-                    })
+            if img_mat is None:
+                raise RuntimeError(f"Cannot decode test image: {info['path']}")
+            actual_h, actual_w = img_mat.shape[:2]
+            if (actual_w, actual_h) != (int(info["width"]), int(info["height"])):
+                raise ValueError(
+                    f"Image dimensions disagree with COCO metadata for image_id={img_id}: "
+                    f"file={actual_w}x{actual_h}, annotation={info['width']}x{info['height']}"
+                )
+            preds = adapter.predict_image(img_mat, actual_w, actual_h)
+            for p in preds:
+                coco_predictions.append({
+                    "image_id": int(img_id),
+                    "category_id": int(p["category_id"]),
+                    "bbox": p["bbox"],
+                    "score": float(p["score"])
+                })
+
+        prefix = os.path.join(output_dir, m_key)
+        with gzip.open(f"{prefix}_coco_predictions.json.gz", "wt", encoding="utf-8") as pred_file:
+            json.dump(coco_predictions, pred_file, ensure_ascii=False)
 
         # 4. Đánh giá COCOeval
         print("  [COCOEVAL] Tính toán metric COCO...")
-        eval_metrics = COCOBenchmarkEvaluator.evaluate(coco_gt, coco_predictions, valid_cat_ids)
+        eval_metrics = COCOBenchmarkEvaluator.evaluate(
+            coco_gt,
+            coco_predictions,
+            valid_cat_ids,
+            list(test_images.keys()),
+            max_detections=max_detections,
+            operating_score_threshold=operating_conf_thresh,
+            operating_iou_threshold=operating_iou_thresh,
+        )
 
-        # 5. Vẽ Confusion Matrix 300 DPI
-        prefix = os.path.join(output_dir, m_key)
+        # 5. Confusion matrix chỉ để trực quan hóa lỗi, không dùng tính P/R/F1.
         try:
-            ConfusionMatrixEngine.generate(coco_gt, coco_predictions, valid_categories, prefix)
+            ConfusionMatrixEngine.generate(
+                coco_gt,
+                coco_predictions,
+                valid_categories,
+                prefix,
+                score_threshold=operating_conf_thresh,
+                iou_threshold=operating_iou_thresh,
+                max_detections=max_detections,
+                chart_dpi=chart_dpi,
+            )
         except Exception as e:
-            print(f"  [WARNING] Không thể vẽ confusion matrix cho {m_key}: {e}")
+            raise RuntimeError(f"Cannot draw confusion matrix for {m_key}") from e
 
         # Lưu CSV chi tiết 32 lớp
+        per_class_combined = {}
         per_class_rows = []
         for cname, cdata in eval_metrics["per_class"].items():
-            per_class_rows.append({
+            combined = {
                 "Class Name": cname,
                 "Precision": cdata["Precision"],
                 "Recall": cdata["Recall"],
+                "F1": cdata["F1"],
+                "TP": cdata["TP"],
+                "FP": cdata["FP"],
+                "FN": cdata["FN"],
                 "mAP50": cdata["mAP50"],
-                "mAP50-95": cdata["mAP50-95"]
-            })
+                "mAP50-95": cdata["mAP50-95"],
+                "AR100": cdata["AR100"],
+            }
+            per_class_rows.append(combined)
+            per_class_combined[cname] = {k: v for k, v in combined.items() if k != "Class Name"}
         if per_class_rows:
-            pd.DataFrame(per_class_rows).to_csv(f"{prefix}_test_per_class_metrics.csv", index=False)
+            pd.DataFrame(per_class_rows).to_csv(
+                f"{prefix}_test_per_class_metrics.csv", index=False, encoding="utf-8-sig"
+            )
 
         res_item = {
             "model_key": m_key,
             "model_name": disp_name,
-            "Precision": eval_metrics["precision"],
-            "Recall": eval_metrics["recall"],
+            "Precision": eval_metrics["Precision"],
+            "Recall": eval_metrics["Recall"],
+            "F1": eval_metrics["F1"],
             "mAP50": eval_metrics["mAP50"],
             "mAP50_95": eval_metrics["mAP50_95"],
+            "mAP75": eval_metrics["mAP75"],
+            "AP_small": eval_metrics["AP_small"],
+            "AP_medium": eval_metrics["AP_medium"],
+            "AP_large": eval_metrics["AP_large"],
+            "AR1": eval_metrics["AR1"],
+            "AR10": eval_metrics["AR10"],
+            "AR100": eval_metrics["AR100"],
             "Patience": m_cfg.get("patience", 10),
             "GFLOPs": gflops,
             "Parameters": params_m,
             "Latency": latency_ms,
             "FPS": fps,
             "status": "Hoàn tất đánh giá",
-            "per_class": eval_metrics["per_class"]
+            "protocol": protocol,
+            "model_provenance": {
+                "family": m_cfg["family"],
+                "model_type": m_cfg.get("model_type"),
+                "model_class": m_cfg.get("model_class"),
+                "checkpoint_sha256": sha256_file(actual_weights),
+                "inference_imgsz": effective_img_size,
+                "device": device,
+            },
+            "operating_point": eval_metrics["operating_point"],
+            "per_class": per_class_combined,
         }
         results_list.append(res_item)
 
@@ -981,7 +1552,9 @@ def execute_common_coco_evaluation(
         print(f"  --> [ĐÓNG GÓI] Đã lưu file kết quả chuẩn hóa: {res_json_file}")
 
     # Xuất báo cáo tổng hợp cho các mô hình vừa chạy
-    ScientificReportVisualizer.generate_all_reports(results_list, valid_categories, output_dir)
+    ScientificReportVisualizer.generate_all_reports(
+        results_list, valid_categories, output_dir, chart_dpi=chart_dpi
+    )
     return results_list
 
 
@@ -1004,10 +1577,12 @@ def merge_team_results(results_dir: str, output_dir: Optional[str] = None):
 
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         config_data = json.load(f)
+    validate_configuration(config_data)
     all_models = config_data.get("models", {})
 
     # Đọc tất cả các file result_*.json
     collected_results = {}
+    protocol_ids = set()
     for fn in os.listdir(results_dir):
         if fn.startswith("result_") and fn.endswith(".json"):
             fp = os.path.join(results_dir, fn)
@@ -1015,10 +1590,24 @@ def merge_team_results(results_dir: str, output_dir: Optional[str] = None):
                 with open(fp, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     m_key = data.get("model_key", fn.replace("result_", "").replace(".json", ""))
+                    if m_key not in all_models:
+                        raise ValueError(f"Unknown model_key '{m_key}'")
+                    protocol_id = data.get("protocol", {}).get("protocol_id")
+                    if not protocol_id:
+                        raise ValueError("Missing protocol.protocol_id; re-run with common-coco-v3")
+                    if m_key in collected_results:
+                        raise ValueError(f"Duplicate result for model_key '{m_key}'")
+                    protocol_ids.add(protocol_id)
                     collected_results[m_key] = data
                     print(f"  [NẠP] Đã nạp kết quả mô hình: {data.get('model_name', m_key)}")
             except Exception as e:
-                print(f"  [WARNING] Không thể đọc {fn}: {e}")
+                raise ValueError(f"Invalid result file {fn}: {e}") from e
+
+    if len(protocol_ids) > 1:
+        raise ValueError(
+            "Refusing to merge results created by different evaluator/dataset protocols: "
+            + ", ".join(sorted(protocol_ids))
+        )
 
     # Ghép vào danh sách 8 mô hình đầy đủ
     master_results_list = []
@@ -1031,7 +1620,8 @@ def merge_team_results(results_dir: str, output_dir: Optional[str] = None):
             master_results_list.append({
                 "model_key": m_key,
                 "model_name": disp_name,
-                "Precision": 0.0, "Recall": 0.0, "mAP50": 0.0, "mAP50_95": 0.0,
+                "Precision": 0.0, "Recall": 0.0, "F1": 0.0,
+                "mAP50": 0.0, "mAP50_95": 0.0, "mAP75": 0.0, "AR100": 0.0,
                 "Patience": m_cfg.get("patience"),
                 "GFLOPs": 0.0, "Parameters": 0.0, "Latency": 0.0, "FPS": 0.0,
                 "status": "Chờ kết quả từ đồng nghiệp",
@@ -1048,7 +1638,10 @@ def merge_team_results(results_dir: str, output_dir: Optional[str] = None):
     ])
     dummy_categories = [{"id": i+1, "name": n} for i, n in enumerate(class_names)]
 
-    ScientificReportVisualizer.generate_all_reports(master_results_list, dummy_categories, output_dir)
+    chart_dpi = int(config_data.get("benchmark_settings", {}).get("chart_dpi", 300))
+    ScientificReportVisualizer.generate_all_reports(
+        master_results_list, dummy_categories, output_dir, chart_dpi=chart_dpi
+    )
     print(f"\n[THÀNH CÔNG] Đã hợp nhất xong kết quả toàn đội vào: {os.path.abspath(output_dir)}")
 
 
@@ -1150,7 +1743,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default=os.path.join(CURRENT_DIR, "Results"), help="Thư mục lưu báo cáo.")
     parser.add_argument("--models", type=str, default="", help="Danh sách mô hình cần đánh giá, cách nhau bởi dấu phẩy (vd: YOLOv26X,FasterRCNN_ResNet50).")
     parser.add_argument("--merge-dir", type=str, default="", help="Đường dẫn thư mục chứa các file result_*.json để hợp nhất toàn đội.")
-    parser.add_argument("--device", type=str, default="cuda:0" if modal.is_local() else "cuda:0", help="Thiết bị GPU/CPU.")
+    parser.add_argument("--device", type=str, default=default_compute_device(), help="Thiết bị GPU/CPU.")
     args = parser.parse_args()
 
     # Nếu gọi lệnh hợp nhất toàn đội
