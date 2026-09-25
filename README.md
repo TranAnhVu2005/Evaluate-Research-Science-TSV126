@@ -32,7 +32,7 @@ Bộ công cụ này chuẩn hóa việc đánh giá toàn bộ **8 mô hình** 
 Hệ thống kết nối và đồng bộ tự động với tài khoản Roboflow:
 ```python
 from roboflow import Roboflow
-rf = Roboflow(api_key="Btr0eSr8IdfmiGGkY1lq")
+rf = Roboflow(api_key="<ROBOFLOW_API_KEY>")  # Đọc tự động từ secrets.json hoặc biến môi trường
 project = rf.workspace("nckhcict2025").project("completed-project")
 version = project.version(5)
 dataset = version.download("coco")
@@ -58,13 +58,22 @@ dataset = version.download("coco")
 
 ---
 
-## 5. Cấu trúc thư mục tối giản (Minimalist & Clean)
+## 5. Cấu trúc thư mục tối giản & Bảo mật (Clean & Secure)
 ```text
 Common_Evaluate/
-├── common_evaluate.py   # Script thực thi duy nhất (Dataset, Adapters, Benchmark, COCOeval, Visualizer, Merge Engine)
-├── models_config.json   # Cấu hình JSON tập trung (YOLOv26X & Faster R-CNN cấu hình sẵn, 6 mô hình để trống)
-└── README.md            # Tài liệu hướng dẫn chi tiết quy trình hợp tác nhóm
+├── common_evaluate.py       # Script thực thi duy nhất (Dataset, Adapters, Benchmark, COCOeval, Merge Engine)
+├── models_config.json       # Cấu hình tập trung (Đã xóa API Key để an toàn chia sẻ/commit git)
+├── .env                     # File biến môi trường chứa Roboflow API Key của bạn (Được .gitignore bảo vệ tuyệt đối)
+├── .env.example             # File mẫu để đồng nghiệp sao chép và tự tạo .env
+├── .gitignore               # Tự động loại trừ .env và kết quả tạm
+└── README.md                # Tài liệu hướng dẫn chi tiết quy trình hợp tác nhóm
 ```
+
+### Cơ chế bảo mật API Key riêng tư:
+Hệ thống tự động tìm kiếm Roboflow API Key theo thứ tự ưu tiên:
+1. **Biến môi trường hệ thống**: `ROBOFLOW_API_KEY`
+2. **File môi trường riêng tư**: `Common_Evaluate/.env` (`ROBOFLOW_API_KEY=...`)
+3. **File config**: `models_config.json` (dự phòng, để trống mặc định)
 
 ---
 

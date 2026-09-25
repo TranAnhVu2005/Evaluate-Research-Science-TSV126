@@ -1,0 +1,10 @@
+# File biến môi trường bảo mật
+.env
+.env.*
+!.env.example
+
+# File kết quả tạm và cache
+Results/
+Common_Evaluate_Results/
+__pycache__/
+*.pyc

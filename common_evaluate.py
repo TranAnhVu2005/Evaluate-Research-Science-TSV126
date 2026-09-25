@@ -72,6 +72,48 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     return {}
 
 
+def get_roboflow_api_key(config_data: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Trích xuất Roboflow API Key theo thứ tự ưu tiên bảo mật:
+    1. Biến môi trường hệ thống: ROBOFLOW_API_KEY
+    2. Tệp môi trường bảo mật: Common_Evaluate/.env
+    3. Tệp cấu hình: models_config.json (nếu có điền)
+    """
+    # 1. Kiểm tra biến môi trường hệ thống
+    env_key = os.environ.get("ROBOFLOW_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    # 2. Kiểm tra file .env
+    candidates = [
+        os.path.join(CURRENT_DIR, ".env"),
+        os.path.join(os.path.dirname(CURRENT_DIR), ".env"),
+        ".env"
+    ]
+    for env_file in candidates:
+        if os.path.exists(env_file):
+            try:
+                with open(env_file, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            if k.strip() == "ROBOFLOW_API_KEY":
+                                val = v.strip().strip('"').strip("'")
+                                if val and val != "your_roboflow_api_key_here":
+                                    return val
+            except Exception:
+                pass
+
+    # 3. Fallback từ config_data (nếu có)
+    if config_data:
+        cfg_key = config_data.get("roboflow", {}).get("api_key", "").strip()
+        if cfg_key:
+            return cfg_key
+
+    return ""
+
+
 # Nạp cấu hình toàn cục
 GLOBAL_CONFIG = load_config()
 MODAL_SETTINGS = GLOBAL_CONFIG.get("modal_settings", {})
@@ -113,7 +155,7 @@ class RoboflowCOCODatasetManager:
 
     def __init__(
         self,
-        api_key: str = "Btr0eSr8IdfmiGGkY1lq",
+        api_key: str = "",
         dataset_root: Optional[str] = None,
         workspace: str = "nckhcict2025",
         project: str = "completed-project",
@@ -121,7 +163,7 @@ class RoboflowCOCODatasetManager:
         dummy_cat_name: str = "19-8-BoSungAnhChoCacLopBiTh-v3zo",
         fallback_classes: Optional[List[str]] = None
     ):
-        self.api_key = api_key
+        self.api_key = api_key if api_key else get_roboflow_api_key()
         self.dataset_root = dataset_root
         self.workspace = workspace
         self.project = project
@@ -157,7 +199,11 @@ class RoboflowCOCODatasetManager:
 
         download_dir = target_dir or candidate_paths[0]
         os.makedirs(download_dir, exist_ok=True)
-        print(f"[DATASET] Đang kết nối Roboflow API để tải tập dữ liệu COCO Version 5...")
+        if not self.api_key:
+            raise ValueError(
+                "[ERROR] Thiếu Roboflow API Key! Vui lòng điền API Key vào tệp 'Common_Evaluate/.env' "
+                "hoặc thiết lập biến môi trường ROBOFLOW_API_KEY."
+            )
 
         from roboflow import Roboflow
         rf = Roboflow(api_key=self.api_key)
@@ -748,7 +794,7 @@ def execute_common_coco_evaluation(
             config_data = json.load(f)
 
     rf_info = config_data.get("roboflow", {})
-    api_key = rf_info.get("api_key", "Btr0eSr8IdfmiGGkY1lq")
+    api_key = rf_info.get("api_key", "") or get_roboflow_api_key(config_data)
     workspace_name = rf_info.get("workspace", "nckhcict2025")
     project_name = rf_info.get("project", "completed-project")
     version_num = rf_info.get("version", 5)
@@ -1049,6 +1095,11 @@ def evaluate_my_models():
     modal run "Common_Evaluate/common_evaluate.py"::evaluate_my_models
     """
     local_cfg = load_config()
+    api_key = get_roboflow_api_key(local_cfg)
+    if "roboflow" not in local_cfg:
+        local_cfg["roboflow"] = {}
+    local_cfg["roboflow"]["api_key"] = api_key
+
     bench_cfg = local_cfg.get("benchmark_settings", {})
     sub_dir = bench_cfg.get("local_output_dir", "Common_Evaluate/Results").split("/")[-1]
     local_out = os.path.join(CURRENT_DIR, sub_dir)
@@ -1073,6 +1124,11 @@ def evaluate_single(model_name: str):
     modal run "Common_Evaluate/common_evaluate.py"::evaluate_single --model-name YOLOv26X
     """
     local_cfg = load_config()
+    api_key = get_roboflow_api_key(local_cfg)
+    if "roboflow" not in local_cfg:
+        local_cfg["roboflow"] = {}
+    local_cfg["roboflow"]["api_key"] = api_key
+
     bench_cfg = local_cfg.get("benchmark_settings", {})
     sub_dir = bench_cfg.get("local_output_dir", "Common_Evaluate/Results").split("/")[-1]
     local_out = os.path.join(CURRENT_DIR, sub_dir)

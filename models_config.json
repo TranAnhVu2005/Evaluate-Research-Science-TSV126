@@ -11,7 +11,8 @@
     "_note": "Đồng nghiệp đổi 'volume_name' thành tên Volume trên tài khoản Modal của mình."
   },
   "roboflow": {
-    "api_key": "Btr0eSr8IdfmiGGkY1lq",
+    "api_key": "",
+    "_note_api_key": "Để trống để bảo mật. Điền API key trong tệp riêng .env hoặc biến môi trường ROBOFLOW_API_KEY.",
     "workspace": "nckhcict2025",
     "project": "completed-project",
     "version": 5,
