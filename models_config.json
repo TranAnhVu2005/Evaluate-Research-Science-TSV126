@@ -1,76 +1,50 @@
 {
-  "_description": "TỆP CẤU HÌNH TẬP TRUNG CHO HỆ THỐNG ĐÁNH GIÁ CHUẨN COCO (COMMON EVALUATE)",
-  "_instruction": "Đồng nghiệp chỉ cần chỉnh sửa các thông số trong tệp này, không cần sửa mã nguồn common_evaluate.py!",
   "modal_settings": {
     "volume_name": "volume-10-09-2026-yolo26x-640",
     "app_name": "app-common-coco-evaluate",
     "gpu": "A100",
     "timeout_seconds": 7200,
     "cloud_dataset_dir": "/data/dataset/Completed-Project-5",
-    "cloud_output_dir": "/data/runs/Common_COCO_Evaluation_Results",
-    "_note": "Đồng nghiệp đổi 'volume_name' thành tên Volume trên tài khoản Modal của mình."
+    "cloud_output_dir": "/data/runs/Common_COCO_Evaluation_Results"
   },
   "roboflow": {
     "api_key": "",
-    "_note_api_key": "Để trống để bảo mật. Điền API key trong tệp riêng .env hoặc biến môi trường ROBOFLOW_API_KEY.",
     "workspace": "nckhcict2025",
     "project": "completed-project",
     "version": 5,
-    "format": "coco",
-    "dummy_category_name": "19-8-BoSungAnhChoCacLopBiTh-v3zo",
-    "_note_dummy": "Lớp rác 0 annotations do Roboflow tự sinh ra, hệ thống sẽ tự động lọc bỏ để giữ chuẩn 32 lớp."
+    "dummy_category_name": "19-8-BoSungAnhChoCacLopBiTh-v3zo"
   },
   "benchmark_settings": {
+    "protocol_name": "common-coco-v4-640-b1",
     "imgsz": 640,
+    "expected_num_models": 8,
     "conf_threshold": 0.001,
-    "eval_conf_threshold": 0.25,
+    "operating_conf_threshold": 0.25,
     "iou_threshold": 0.50,
     "max_detections": 100,
+    "expected_num_classes": 32,
+    "expected_test_images": 1481,
     "warmup_runs": 10,
     "batch_size": 1,
     "chart_dpi": 300,
-    "local_output_dir": "Common_Evaluate/Results"
+    "local_output_dir": "Results"
   },
   "classes": [
-    "beef",
-    "bellpepper",
-    "bittergourd",
-    "bottlegourd",
-    "broccoli",
-    "cabbage",
-    "carrot",
-    "cauliflower",
-    "chayote",
-    "chicken",
-    "chickenegg",
-    "chickenleg",
-    "chickenwin",
-    "corn",
-    "cucumber",
-    "duckegg",
-    "eggplant",
-    "garlic",
-    "ginger",
-    "jicama",
-    "okra",
-    "onion",
-    "pork",
-    "potato",
-    "pumpkin",
-    "radish",
-    "scallion",
-    "shrimp",
-    "spongegourd",
-    "sweetpotato",
-    "tofu",
-    "tomato"
+    "beef", "bellpepper", "bittergourd", "bottlegourd", "broccoli", "cabbage",
+    "carrot", "cauliflower", "chayote", "chicken", "chickenegg", "chickenleg",
+    "chickenwin", "corn", "cucumber", "duckegg", "eggplant", "garlic", "ginger",
+    "jicama", "okra", "onion", "pork", "potato", "pumpkin", "radish", "scallion",
+    "shrimp", "spongegourd", "sweetpotato", "tofu", "tomato"
+  ],
+  "ignored_checkpoint_classes": [
+    "19-8-BoSungAnhChoCacLopBiTh-v3zo"
   ],
   "models": {
     "YOLOv26X": {
       "display_name": "YOLOv26X",
-      "owner": "Trần Anh Vũ",
       "family": "ultralytics",
       "model_type": "yolo",
+      "imgsz": 640,
       "weights": "/data/runs/10_09_2026_YOLO26X_640/best.pt",
       "local_weights": "Yolov26/10_09_2026/best.pt",
       "patience": 10,
@@ -78,9 +52,13 @@
     },
     "FasterRCNN_ResNet50": {
       "display_name": "Faster R-CNN + ResNet50",
-      "owner": "Trần Anh Vũ",
       "family": "torchvision",
       "model_type": "fasterrcnn_resnet50_fpn_v2",
+      "label_offset": 1,
+      "imgsz": 640,
+      "constructor_kwargs": {
+        "box_nms_thresh": 0.5
+      },
       "weights": "/data/runs/10_09_2026_FasterRCNN_ResNet50_640/best.pth",
       "local_weights": "FasterRCNN/10_09_2026/best.pth",
       "patience": 10,
@@ -88,9 +66,13 @@
     },
     "FasterRCNN_MobileNetv3Large": {
       "display_name": "FasterRCNN_MobileNetv3Large",
-      "owner": "Đồng nghiệp",
       "family": "torchvision",
       "model_type": "fasterrcnn_mobilenet_v3_large_fpn",
+      "label_offset": 1,
+      "imgsz": 640,
+      "constructor_kwargs": {
+        "box_nms_thresh": 0.5
+      },
       "weights": "",
       "local_weights": "",
       "patience": null,
@@ -98,9 +80,13 @@
     },
     "FCOS_ResNet50_FPN": {
       "display_name": "FCOS + ResNet50-FPN",
-      "owner": "Đồng nghiệp",
       "family": "torchvision",
       "model_type": "fcos_resnet50_fpn",
+      "label_offset": 1,
+      "imgsz": 640,
+      "constructor_kwargs": {
+        "nms_thresh": 0.55
+      },
       "weights": "",
       "local_weights": "",
       "patience": null,
@@ -108,9 +94,9 @@
     },
     "YOLOv11": {
       "display_name": "YOLOv11",
-      "owner": "Đồng nghiệp",
       "family": "ultralytics",
       "model_type": "yolo",
+      "imgsz": 640,
       "weights": "",
       "local_weights": "",
       "patience": null,
@@ -118,31 +104,37 @@
     },
     "RetinaNet": {
       "display_name": "RetinaNet",
-      "owner": "Đồng nghiệp",
       "family": "torchvision",
       "model_type": "retinanet_resnet50_fpn",
+      "label_offset": 1,
+      "imgsz": 640,
+      "constructor_kwargs": {
+        "nms_thresh": 0.5
+      },
       "weights": "",
       "local_weights": "",
       "patience": null,
       "enabled": false
     },
     "RFDETR_Medium": {
-      "display_name": "RFDETR-Medium",
-      "owner": "Đồng nghiệp",
+      "display_name": "RF-DETR Medium",
       "family": "rfdetr",
-      "model_type": "rfdetr",
+      "model_type": "rfdetr_medium",
+      "model_class": "RFDETRMedium",
+      "label_offset": 0,
+      "imgsz": 640,
       "weights": "/models/RFDETR_Medium/best.pth",
-      "local_weights": "Evaluate-Research-Science-TSV126/models/RFDETR_Medium/best.pth",
+      "local_weights": "models/RFDETR_Medium/best.pth",
       "patience": 10,
       "enabled": true
     },
     "RTDETR_L": {
       "display_name": "RTDETR-L",
-      "owner": "Đồng nghiệp",
       "family": "ultralytics",
       "model_type": "rtdetr",
+      "imgsz": 640,
       "weights": "/models/RTDETR_L/best.pt",
-      "local_weights": "Evaluate-Research-Science-TSV126/models/RTDETR_L/best.pt",
+      "local_weights": "models/RTDETR_L/best.pt",
       "patience": 10,
       "enabled": true
     }

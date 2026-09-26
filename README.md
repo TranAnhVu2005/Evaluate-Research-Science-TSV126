@@ -11,7 +11,9 @@ Trong nghiên cứu thị giác máy tính, mỗi thư viện (Ultralytics, Torc
 Hệ thống **`Common_Evaluate`** giải quyết triệt để vấn đề này bằng cách đưa toàn bộ **8 mô hình** về **duy nhất một thước đo chuẩn mực quốc tế**: **MS COCO Evaluation Protocol (`pycocotools.cocoeval.COCOeval`)**:
 * Tất cả 8 mô hình đều nhận diện trên cùng **1.481 ảnh** độc lập của tập Test chuẩn.
 * Dự đoán của mọi mô hình đều được chuẩn hóa về định dạng COCO: `{"image_id", "category_id", "bbox": [xmin, ymin, w, h], "score"}` với tọa độ quy đổi về kích thước ảnh gốc.
-* Đánh giá công bằng, khách quan 100% bằng đối tượng `COCOeval`, đảm bảo tính minh bạch trước Hội đồng Khoa học và các phản biện bài báo quốc tế (Reviewers).
+* Đánh giá thống nhất bằng đối tượng `COCOeval`, với protocol và provenance có thể kiểm chứng khi tổng hợp kết quả.
+
+Ba adapter Ultralytics, Torchvision và RF-DETR vẫn cần thiết, nhưng chúng không phải evaluator. Chúng chỉ tải đúng kiến trúc checkpoint, chạy inference và chuẩn hóa đầu ra khác nhau của từng thư viện thành bốn trường COCO chung: `bbox`, `score`, `category_id`, `image_id`. Sau bước này, toàn bộ metric chỉ được tính bởi `COCOeval`.
 
 ---
 
@@ -27,9 +29,9 @@ Hệ thống **`Common_Evaluate`** giải quyết triệt để vấn đề này
     2. **`FCOS_ResNet50_FPN`** (Torchvision)
     3. **`YOLOv11`** (Ultralytics)
     4. **`RetinaNet`** (Torchvision)
-    5. **`RFDETR_Medium`** (RF-DETR / RT-DETR Medium - Ultralytics)
+    5. **`RFDETR_Medium`** (RF-DETR chính thức của Roboflow; không phải Ultralytics RT-DETR)
     6. **`RTDETR_L`** (RT-DETR Large - Ultralytics)
-  * Cấu hình của 6 mô hình này đã được để trống hoàn toàn trong [`models_config.json`](models_config.json). Đồng nghiệp chỉ cần điền đường dẫn file trọng số `weights`, số epoch kiên nhẫn `patience` và bật `"enabled": true` cho mô hình mình phụ trách.
+  * Pipeline hỗ trợ đủ 8 kiến trúc. Mỗi lượt chạy mặc định chỉ đánh giá các mô hình có `"enabled": true`; người dùng tự chọn model cần chạy và chỉ phải cung cấp checkpoint cho các model đã bật.
 
 ---
 
@@ -47,21 +49,25 @@ dataset = version.download("coco")
 
 ---
 
-## 4. Bảng 10 thông số chuẩn mực bắt buộc đo lường
-Toàn bộ kết quả đều được xuất ra định dạng bảng 10 cột chuẩn khoa học:
+## 4. Các thông số chuẩn mực bắt buộc đo lường
+Toàn bộ kết quả được xuất theo cùng một schema; bảng dưới đây là các trường cốt lõi:
 
 | STT | Tên thông số | Định dạng | Phương pháp & Tiêu chuẩn đo lường |
 | :---: | :--- | :---: | :--- |
 | 1 | **Mô hình** | Text | Tên định danh của mô hình (Model Name) |
-| 2 | **Precision** | Float (`.4f`) | Độ chính xác vận hành thực tế tại điểm $\text{conf} \ge 0.25, \text{IoU} \ge 0.50$: $\frac{TP}{TP + FP}$ |
-| 3 | **Recall** | Float (`.4f`) | Độ nhạy vận hành thực tế tại điểm $\text{conf} \ge 0.25, \text{IoU} \ge 0.50$: $\frac{TP}{TP + FN}$ |
-| 4 | **mAP@50** | Float (`.4f`) | Diện tích dưới đường cong Precision-Recall tại $\text{IoU} = 0.50$ chuẩn MS COCO (`stats[1]`) |
-| 5 | **mAP@50-95** | Float (`.4f`) | COCO Primary Metric (Trung bình AP từ IoU 0.50 đến 0.95, bước 0.05 - `stats[0]`) |
+| 2 | **Precision** | Float (`.4f`) | Micro precision từ matching của `COCOeval` tại `conf=0.25`, `IoU=0.50` (TP / (TP + FP)) |
+| 3 | **Recall** | Float (`.4f`) | Micro recall từ cùng matching của `COCOeval` (TP / (TP + FN)); COCO AR@100 được xuất ở cột riêng |
+| 4 | **mAP@50** | Float (`.4f`) | Mean Average Precision tại $\text{IoU} = 0.50$ (`stats[1]`) |
+| 5 | **mAP@50-95** | Float (`.4f`) | COCO Primary Challenge Metric (Trung bình AP từ IoU 0.50 đến 0.95, bước 0.05) |
 | 6 | **Patience** | Integer | Số epoch chờ khi Early Stopping trong quá trình huấn luyện |
-| 7 | **GFLOPs** | Float (`.2f`) | Độ phức tạp tính toán (tỷ phép tính) đo thực nghiệm bằng `thop` trên Dummy Input $1 \times 3 \times 640 \times 640$ (không dùng công thức giả định) |
-| 8 | **Parameters** | Float (`.2f` M) | Tổng số tham số thực tế của mô hình (triệu tham số - Millions) đếm trực tiếp từ PyTorch module |
-| 9 | **Latency** | Float (`.2f` ms) | Độ trễ toàn trình End-to-End (Đọc ảnh cv2 + Letterbox tiền xử lý + Suy luận PyTorch + Giải mã Boxes) trên GPU A100 với batch size = 1 |
+| 7 | **GFLOPs** | Float (`.2f`) | Độ phức tạp tính toán (tỷ phép tính) đo bằng `thop` trên Dummy Input $1 \times 3 \times 640 \times 640$ |
+| 8 | **Parameters** | Float (`.2f` M) | Tổng số tham số của mô hình (triệu tham số - Millions) |
+| 9 | **Latency** | Float (`.2f` ms) | Thời gian xử lý trung bình 1 ảnh trên GPU A100 (đo trên 1.481 ảnh với batch size = 1) |
 | 10 | **FPS** | Float (`.2f`) | Tốc độ khung hình trên giây ($\text{FPS} = 1000 / \text{Latency}$) |
+
+File kết quả còn xuất `F1`, `mAP@75`, `AP_small/medium/large`, `AR@1/10/100` và metric từng lớp.
+
+Nếu `thop` không profile được một kiến trúc detector, `GFLOPs` được ghi là `null`/`-`; hệ thống không nội suy GFLOPs từ số parameters. Latency không bao gồm thời gian đọc ảnh từ ổ đĩa.
 
 ---
 
@@ -69,7 +75,7 @@ Toàn bộ kết quả đều được xuất ra định dạng bảng 10 cột 
 Dự án áp dụng nguyên lý tách biệt hoàn toàn giữa Cấu hình, Bí mật và Mã nguồn:
 
 ```text
-Common_Evaluate/
+project-root/
 ├── common_evaluate.py       # File mã nguồn DUY NHẤT (Dataset, Adapters, Benchmark, COCOeval, Merge Engine)
 ├── models_config.json       # File cấu hình TẬP TRUNG (Modal Cloud, Roboflow, Benchmark, 32 lớp, 8 mô hình)
 ├── .env                     # File biến môi trường BẢO MẬT (Chứa Roboflow API Key riêng, không bị commit)
@@ -81,7 +87,7 @@ Common_Evaluate/
 ### Cơ chế bảo mật API Key riêng tư:
 Hệ thống tự động nạp Roboflow API Key theo thứ tự ưu tiên:
 1. **Biến môi trường hệ thống**: `ROBOFLOW_API_KEY`
-2. **File môi trường riêng tư**: `Common_Evaluate/.env` (`ROBOFLOW_API_KEY=...`)
+2. **File môi trường riêng tư**: `.env` (`ROBOFLOW_API_KEY=...`)
 3. **File config**: `models_config.json` (dự phòng, mặc định để trống `""`)
 
 ---
@@ -105,35 +111,47 @@ Hệ thống tự động nạp Roboflow API Key theo thứ tự ưu tiên:
      "app_name": "app-common-coco-evaluate"
    }
    ```
-2. Đổi `"enabled": false` cho 2 mô hình của Vũ (`YOLOv26X`, `FasterRCNN_ResNet50`).
-3. Với các mô hình mình phụ trách (ví dụ `YOLOv11` và `RetinaNet`):
-   - Điền đường dẫn file trọng số `weights` trên Modal: `"/data/runs/TenThuMucTrain/best.pt"`
-   - Điền số `patience`: ví dụ `10`
-   - Đặt `"enabled": true`
+2. Chọn một hoặc nhiều mô hình cần đánh giá bằng trường `enabled`.
+3. Với từng mô hình đã bật:
+   - Điền đường dẫn checkpoint trên Modal vào `weights`, ví dụ `"/data/runs/TenThuMucTrain/best.pt"`.
+   - Có thể điền đường dẫn dự phòng trên máy local vào `local_weights`.
+   - Điền đúng `patience` đã dùng khi train. Không dùng pretrained checkpoint hoặc random weights thay cho checkpoint sau train.
+   - Đặt `"enabled": true`; các model chưa muốn chạy giữ `"enabled": false`.
+
+Khi chạy local, cũng có thể ghi đè đường dẫn bằng biến môi trường `MODEL_WEIGHTS_<MODEL_KEY>`, ví dụ `MODEL_WEIGHTS_YOLOV11`. Pipeline chỉ kiểm tra checkpoint của các model được chọn trong lượt chạy hiện tại.
+
+Các trường cấu hình quan trọng cho từng framework:
+
+- `family`: một trong `ultralytics`, `torchvision`, `rfdetr`.
+- `model_type`: `yolo`, `rtdetr`, hoặc đúng tên constructor Torchvision đã huấn luyện.
+- `model_class`: class RF-DETR chính thức, ví dụ `RFDETRMedium`.
+- `imgsz`: bắt buộc là `640` cho cả 8 mô hình. RF-DETR Medium được nạp với resolution override 640; checkpoint phải tương thích với API RF-DETR đang được pin.
+- `label_offset`: thường là `1` cho Torchvision và `0` cho RF-DETR/Ultralytics.
+- `checkpoint_classes`: chỉ cần khai báo khi thứ tự/số lớp trong checkpoint khác danh sách `classes` chung.
+- `class_name_map` và `ignored_checkpoint_classes`: ánh xạ bí danh hoặc bỏ lớp rác một cách tường minh. Pipeline không tự đoán class ID.
 
 ### Bước 3: Chạy đánh giá
 * **Cách 1: Chạy trên Modal Cloud GPU A100 (Khuyến nghị)**:
   ```bash
-  # Tự động đọc .env và models_config.json từ máy bạn, chỉ đánh giá mô hình có enabled: true
-  modal run "Common_Evaluate/common_evaluate.py"::evaluate_my_models
+  # Tự động đọc .env và models_config.json, sau đó chạy model có enabled=true
+  modal run common_evaluate.py::evaluate_my_models
   ```
   *Hoặc đánh giá đích danh 1 mô hình:*
   ```bash
-  modal run "Common_Evaluate/common_evaluate.py"::evaluate_single --model-name YOLOv11
+  modal run common_evaluate.py::evaluate_single --model-name YOLOv11
   ```
 * **Cách 2: Chạy trên máy cục bộ (Local / Colab / Kaggle)**:
   ```bash
-  # Chạy các mô hình có enabled: true
-  python "Common_Evaluate/common_evaluate.py"
+  # Chạy các model có enabled=true
+  python common_evaluate.py
 
   # Hoặc chỉ định danh sách mô hình
-  python "Common_Evaluate/common_evaluate.py" --models YOLOv11,RetinaNet
+  python common_evaluate.py --models YOLOv11,RetinaNet
   ```
 
 ### Bước 4: Nộp file kết quả về cho nhóm
-Sau khi chạy xong, trong thư mục `Common_Evaluate/Results/` sẽ xuất hiện các tệp:
+Sau khi chạy xong, trong thư mục `Results/` sẽ xuất hiện các tệp:
 - `result_<TenMoHinh>.json` (Ví dụ `result_YOLOv11.json`, `result_RetinaNet.json`): Tệp JSON chứa đầy đủ 10 chỉ số chuẩn hóa và mAP của từng lớp trong 32 lớp.
-- `{TenMoHinh}_confusion_matrix_raw.png` & `{TenMoHinh}_confusion_matrix_normalized.png`: Ma trận nhầm lẫn 300 DPI.
 - `{TenMoHinh}_test_per_class_metrics.csv`: Bảng chi tiết 32 lớp.
 
 > 📢 **QUY TẮC CHIA SẺ**: Đồng nghiệp **chỉ cần gửi file `result_<TenMoHinh>.json`** (kích thước siêu nhẹ, chỉ vài KB) qua Zalo/Drive/Git cho Vũ, **không cần gửi file weights nặng hàng trăm MB!**
@@ -145,13 +163,13 @@ Khi bạn (Vũ) nhận được các file `result_*.json` từ các thành viên
 1. Gom toàn bộ các file `result_*.json` vào một thư mục (ví dụ `team_results/`).
 2. Chạy lệnh hợp nhất duy nhất:
    ```bash
-   python "Common_Evaluate/common_evaluate.py" --merge-dir ./team_results
+   python common_evaluate.py --merge-dir ./team_results
    ```
 3. Hệ thống sẽ tự động tổng hợp toàn bộ các sản phẩm khoa học sẵn sàng đưa vào bài báo:
-   * **`full_8_models_scientific_comparison.md`**: Bảng so sánh 10 chỉ số chuẩn của cả 8 mô hình.
-   * **`full_8_models_comparison_table.csv`**: File CSV phục vụ chèn bảng vào LaTeX / Word / Excel.
-   * **`full_8_models_coco_metrics_comparison.png`** (300 DPI): Biểu đồ so sánh 4 panel trực quan (mAP50, mAP50-95, GFLOPs, FPS).
-   * **`all_classes_cross_model_map50_matrix.csv`**: Ma trận đối đầu chi tiết 32 lớp giữa cả 8 mô hình.
+   * **`summary_coco_comparison.md`** và **`summary_coco_comparison.csv`**: Bảng tổng hợp các metric của cả 8 mô hình.
+   * **`comparison_map_chart.png`**: Biểu đồ mAP50 và mAP50-95.
+   * **`comparison_tradeoff_chart.png`**: Biểu đồ trade-off accuracy/speed.
+   * **`all_models_per_class_comparison.csv`**: Bảng mAP theo 32 lớp giữa các mô hình.
 
 ---
 
@@ -173,34 +191,14 @@ Tập dữ liệu bao gồm 32 lớp nguyên liệu thực phẩm đặc trưng:
 
 ---
 
-## 9. Đảm bảo Tính công bằng & Minh bạch Khoa học (Scientific Fairness & Rigor)
-Khi so sánh các mô hình thuộc các framework và họ kiến trúc khác nhau (Ultralytics, Torchvision, RF-DETR), sự công bằng và tính khoa học được đảm bảo tuyệt đối qua 6 nguyên tắc cốt lõi:
+## 9. Đảm bảo Tính công bằng Khoa học (Scientific Fairness)
+Khi so sánh các mô hình thuộc framework Ultralytics (YOLOv26X, YOLOv11, RT-DETR) với Torchvision (Faster R-CNN, FCOS, RetinaNet), tính nhất quán của benchmark được đảm bảo nhờ:
+1. **Trọng tài độc lập duy nhất**: Không sử dụng hàm tính mAP nội bộ của từng thư viện mà toàn bộ dự đoán được đưa vào đối tượng chuẩn quốc tế `pycocotools.cocoeval.COCOeval`.
+2. **Quy đổi kích thước chuẩn xác**: Tọa độ bounding box dự đoán của mọi mô hình đều được ánh xạ ngược về kích thước pixel gốc của ảnh test $(orig\_w, orig\_h)$.
+3. **Đồng nhất ngưỡng Confidence**: Cả 3 họ adapter đều thiết lập `conf_threshold = 0.001` để xuất dải điểm số cho `COCOeval`; Precision/Recall/F1 được suy ra trực tiếp từ `COCOeval.evalImgs` tại `operating_conf_threshold`, có áp dụng cùng quy tắc match, ignore và crowd của COCO.
+4. **Môi trường phần cứng chuẩn hóa**: Đo đạc độ trễ trên cùng GPU NVIDIA A100 (Modal Cloud) với `batch_size = 1`, cơ chế đồng bộ `torch.cuda.synchronize()` và loại bỏ độ trễ khởi động kernel bằng bước warm-up.
+5. **Khóa giao thức đầu vào**: Cả 8 model bắt buộc inference ở `imgsz = 640`, `batch_size = 1`; ảnh test phải đúng 640 × 640 và merge kiểm tra lại các giá trị này trong cả protocol lẫn provenance.
 
-1. **Đồng nhất tiền xử lý bằng Letterbox (Aspect-Ratio Preserved)**:
-   - Thay vì dùng `cv2.resize` bóp méo khung hình, cả Ultralytics và Torchvision đều được áp dụng thuật toán `letterbox` chuẩn với padding màu xám `(114, 114, 114)` đưa về kích thước $640 \times 640$.
-   - Tọa độ Bounding Box được ánh xạ ngược chuẩn xác: $x_{\text{orig}} = (x_{\text{box}} - dw) / ratio$ và $y_{\text{orig}} = (y_{\text{box}} - dh) / ratio$. Không có bất kỳ mô hình nào bị thiên vị do biến dạng hình học.
+NMS và hậu xử lý tạo prediction vẫn thuộc implementation chuẩn của từng kiến trúc; `COCOeval` thống nhất cách chấm các prediction đó, không thay thế hậu xử lý nội tại của model.
 
-2. **Trọng tài độc lập duy nhất**:
-   - Không dùng bất kỳ hàm tính mAP hay evaluator nội bộ của riêng Ultralytics hay Torchvision.
-   - Toàn bộ kết quả bounding box của 8 mô hình được chuẩn hóa và đánh giá trực tiếp qua đối tượng chính quy quốc tế `pycocotools.cocoeval.COCOeval`.
-
-3. **Phân định rạch ròi giữa Operational Precision/Recall và COCO mAP**:
-   - Khắc phục triệt để lỗi đánh đồng "Precision" với $AP_{50}$.
-   - **`Precision`** và **`Recall`**: Đo đạc độ chính xác và độ nhạy vận hành thực tế tại điểm $\text{conf} \ge 0.25, \text{IoU} \ge 0.50$ qua greedy box matching, đồng bộ 100% với Confusion Matrix.
-   - **`mAP@50`** và **`mAP@50-95`**: Tính toán theo diện tích tích phân toàn dải chuẩn MS COCO (`stats[1]` và `stats[0]`).
-
-4. **Tuyệt đối KHÔNG sử dụng số liệu hardcode / cache giả lập**:
-   - Hệ thống loại bỏ hoàn toàn mọi khối fallback giả lập số liệu. Nếu thiếu file weights thực tế (`best.pt`, `best.pth`), mô hình sẽ nhận trạng thái `"Chưa có file weights"` với các chỉ số bằng `0.0`.
-   - Mọi kết quả công bố bắt buộc phải được suy luận trực tiếp từ file trọng số thật trên 1.481 ảnh test.
-
-5. **Bộ điều hợp hoàn chỉnh cho RF-DETR (`RFDETRNativeAdapter`)**:
-   - Tích hợp pipeline suy luận trực tiếp từ package `rfdetr` chính gốc (`RFDETRMedium` + PIL Image format), tự động giải mã cấu trúc `supervision.Detections` (`xyxy`, `confidence`, `class_id`) và quy đổi chuẩn xác về COCO category IDs của 32 lớp nguyên liệu.
-   - Cơ chế nạp checkpoint linh hoạt: Ưu tiên nạp native qua `rfdetr.RFDETRMedium`, có cảnh báo minh bạch nếu môi trường thiếu thư viện và bắt buộc fallback sang Ultralytics RT-DETR.
-
-6. **Đồng nhất nguồn cấu hình ngưỡng vận hành (`eval_conf_threshold`)**:
-   - Khắc phục nguy cơ lệch ngưỡng: Thông số `eval_conf_threshold: 0.25` được khai báo tập trung trong `models_config.json` và dùng chung đồng thời cho cả thuật toán tính toán Operational Precision & Recall lẫn ma trận nhầm lẫn Confusion Matrix.
-   - Lưu trữ song song chỉ số `coco_ar100` (Average Recall chuẩn COCO tại maxDets=100) trong file kết quả JSON.
-
-7. **Đo đạc hiệu năng tính toán thực nghiệm chuẩn xác**:
-   - **Latency**: Đo lường End-to-End trọn vẹn (Đọc ảnh `cv2.imread` + Letterbox + Suy luận PyTorch GPU + Giải mã Bounding Boxes) trên GPU NVIDIA A100 với Batch Size = 1.
-   - **GFLOPs**: Đo thực nghiệm bằng `thop`. Nếu cấu trúc Transformer động không được thư viện hỗ trợ, hệ thống ghi nhận `0.0` kèm cảnh báo rõ ràng, tuyệt đối không dùng công thức nhân hệ số áng chừng không có căn cứ khoa học.
+Mỗi `result_<model>.json` chứa protocol `common-coco-v4-640-b1`, `protocol_id`, SHA-256 của annotation test và checkpoint, phiên bản thư viện, kích thước inference 640, batch size 1, cấu hình ngưỡng và danh sách lớp. Lệnh merge chấp nhận kết quả của các model được đánh giá ở những lượt khác nhau nhưng từ chối file sai protocol, sai kích thước, sai batch hoặc được tạo từ dataset/evaluator khác; model chưa có kết quả được ghi rõ là đang chờ và không tham gia biểu đồ so sánh. Không được chép metric từ log train, cache evaluator cũ hoặc bộ so khớp riêng vào bảng chung; toàn bộ metric chất lượng đều xuất phát từ `pycocotools.COCOeval`.
