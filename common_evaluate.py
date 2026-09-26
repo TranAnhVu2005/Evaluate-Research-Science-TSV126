@@ -19,7 +19,7 @@ import modal
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(CURRENT_DIR, "models_config.json")
-PROTOCOL_NAME = "common-coco-v5-640-b1"
+PROTOCOL_NAME = "common-coco-v7-640-b1"
 REQUIRED_MODEL_KEYS = {
     "YOLOv26X",
     "FasterRCNN_ResNet50",
@@ -194,6 +194,10 @@ def build_resolved_inference_config(
                 getattr(adapter, "effective_constructor_kwargs", {})
             ),
             "background_class_id": getattr(adapter, "background_class_id", None),
+            "ignored_output_labels": sorted(
+                int(label)
+                for label in getattr(adapter, "ignored_output_labels", set())
+            ),
         },
         "checkpoint_classes": [
             {"index": int(index), "name": str(name)}
@@ -235,7 +239,7 @@ def build_protocol_metadata(
             "inference_imgsz": int(bench_cfg.get("imgsz", 640)),
             "inference_batch_size": int(bench_cfg.get("batch_size", 1)),
             "prediction_conf_threshold": float(bench_cfg.get("conf_threshold", 0.0)),
-            "operating_conf_threshold": float(bench_cfg.get("operating_conf_threshold", 0.25)),
+            "operating_conf_threshold": float(bench_cfg.get("operating_conf_threshold", 0.55)),
             "operating_iou_threshold": float(bench_cfg.get("iou_threshold", 0.50)),
             "operating_metric_source": "pycocotools.COCOeval.evalImgs",
             "operating_averaging": "micro_over_all_categories",
@@ -280,7 +284,7 @@ def validate_configuration(config_data: Dict[str, Any]) -> None:
         raise ValueError("benchmark_settings.expected_num_models must be 8")
     locked_settings = {
         "conf_threshold": 0.0,
-        "operating_conf_threshold": 0.25,
+        "operating_conf_threshold": 0.55,
         "iou_threshold": 0.50,
         "max_detections": 100,
         "expected_num_classes": 32,
@@ -781,6 +785,12 @@ class TorchvisionAdapter:
         self.imgsz = imgsz
         self.max_detections = max_detections
         self.label_offset = int(model_cfg.get("label_offset", 1))
+        # Some Torchvision checkpoints in this benchmark were trained with
+        # one-based target labels.  One-stage heads (FCOS/RetinaNet) can still
+        # emit the unused leading output channel when the common confidence
+        # threshold is zero.  Treat labels below label_offset as reserved
+        # outputs, not as dataset classes.
+        self.ignored_output_labels = set(range(self.label_offset))
         self.checkpoint_classes = model_cfg.get("checkpoint_classes") or class_names
         indexed_names = {index: name for index, name in enumerate(self.checkpoint_classes)}
         self.class_idx_to_cat_id, self.ignored_class_indices = build_class_mapping(
@@ -788,7 +798,7 @@ class TorchvisionAdapter:
         )
         self.backend_max_detections = (
             max(self.max_detections, 300)
-            if self.ignored_class_indices
+            if self.ignored_class_indices or self.ignored_output_labels
             else self.max_detections
         )
         num_model_classes = len(self.checkpoint_classes) + self.label_offset
@@ -797,7 +807,7 @@ class TorchvisionAdapter:
         kwargs["min_size"] = int(imgsz)
         kwargs["max_size"] = int(imgsz)
 
-        ckpt = torch.load(weights_path, map_location=self.device)
+        ckpt = torch.load(weights_path, map_location=self.device, weights_only=True)
         embedded_classes = ckpt.get("class_names") if isinstance(ckpt, dict) else None
         if embedded_classes is not None:
             embedded_classes = [str(name) for name in embedded_classes]
@@ -905,9 +915,11 @@ class TorchvisionAdapter:
         order = np.argsort(-scores, kind="stable")
         for box, score, label in zip(boxes[order], scores[order], labels[order]):
             lbl = int(label)
-            cls_idx = lbl - self.label_offset
             if score < self.conf_thresh:
                 continue
+            if lbl in self.ignored_output_labels:
+                continue
+            cls_idx = lbl - self.label_offset
             if not 0 <= cls_idx < len(self.checkpoint_classes):
                 raise ValueError(
                     f"Label {lbl} is invalid for label_offset={self.label_offset} "
@@ -1250,7 +1262,7 @@ class COCOBenchmarkEvaluator:
         valid_cat_ids: List[int],
         image_ids: List[int],
         max_detections: int = 100,
-        operating_score_threshold: float = 0.25,
+        operating_score_threshold: float = 0.55,
         operating_iou_threshold: float = 0.50,
     ) -> Dict[str, Any]:
         from pycocotools.cocoeval import COCOeval
@@ -1535,7 +1547,7 @@ def execute_common_coco_evaluation(
     bench_cfg = config_data.get("benchmark_settings", {})
     img_size = int(bench_cfg.get("imgsz", 640))
     conf_thresh = float(bench_cfg.get("conf_threshold", 0.0))
-    operating_conf_thresh = float(bench_cfg.get("operating_conf_threshold", 0.25))
+    operating_conf_thresh = float(bench_cfg.get("operating_conf_threshold", 0.55))
     operating_iou_thresh = float(bench_cfg.get("iou_threshold", 0.50))
     max_detections = int(bench_cfg.get("max_detections", 100))
     warmup_n = int(bench_cfg.get("warmup_runs", 10))

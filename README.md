@@ -55,7 +55,7 @@ Toàn bộ kết quả được xuất theo cùng một schema; bảng dưới �
 | STT | Tên thông số | Định dạng | Phương pháp & Tiêu chuẩn đo lường |
 | :---: | :--- | :---: | :--- |
 | 1 | **Mô hình** | Text | Tên định danh của mô hình (Model Name) |
-| 2 | **Precision** | Float (`.4f`) | Micro precision từ matching của `COCOeval` tại `conf=0.25`, `IoU=0.50` (TP / (TP + FP)) |
+| 2 | **Precision** | Float (`.4f`) | Micro precision từ matching của `COCOeval` tại `conf=0.55`, `IoU=0.50` (TP / (TP + FP)) |
 | 3 | **Recall** | Float (`.4f`) | Micro recall từ cùng matching của `COCOeval` (TP / (TP + FN)); COCO AR@100 được xuất ở cột riêng |
 | 4 | **mAP@50** | Float (`.4f`) | Mean Average Precision tại $\text{IoU} = 0.50$ (`stats[1]`) |
 | 5 | **mAP@50-95** | Float (`.4f`) | COCO Primary Challenge Metric (Trung bình AP từ IoU 0.50 đến 0.95, bước 0.05) |
@@ -126,7 +126,7 @@ Các trường cấu hình quan trọng cho từng framework:
 - `model_type`: `yolo`, `rtdetr`, hoặc đúng tên constructor Torchvision đã huấn luyện.
 - `model_class`: class RF-DETR chính thức, ví dụ `RFDETRMedium`.
 - `imgsz`: bắt buộc là `640` cho cả 8 mô hình. RF-DETR Medium được nạp với resolution override 640; checkpoint phải tương thích với API RF-DETR đang được pin.
-- `label_offset`: thường là `1` cho Torchvision và `0` cho RF-DETR/Ultralytics.
+- `label_offset`: là `1` cho các checkpoint Torchvision hiện tại và `0` cho RF-DETR/Ultralytics. Với FCOS/RetinaNet được train bằng nhãn một-based, output nhỏ hơn `label_offset` là kênh dự phòng và bị loại trước giới hạn 100 detection.
 - `checkpoint_classes`: khai báo khi thứ tự/số lớp khác danh sách `classes` chung; với checkpoint Torchvision không chứa metadata `class_names`, trường này là bắt buộc để hệ thống không phải đoán thứ tự lớp.
 - `class_name_map` và `ignored_checkpoint_classes`: ánh xạ bí danh hoặc bỏ lớp rác một cách tường minh. Pipeline không tự đoán class ID.
 
@@ -201,4 +201,4 @@ Khi so sánh các mô hình thuộc framework Ultralytics (YOLOv26X, YOLOv11, RT
 
 NMS và hậu xử lý tạo prediction vẫn thuộc implementation chuẩn của từng kiến trúc; `COCOeval` thống nhất cách chấm các prediction đó, không thay thế hậu xử lý nội tại của model.
 
-Mỗi `result_<model>.json` chứa protocol `common-coco-v5-640-b1`, `protocol_id`, SHA-256 của annotation test và checkpoint, phiên bản thư viện, kích thước inference 640, batch size 1, cấu hình ngưỡng, hậu xử lý, NMS và ánh xạ lớp. Lệnh merge chấp nhận kết quả của các model được đánh giá ở những lượt khác nhau nhưng từ chối file sai protocol, sai kích thước, sai batch, sai cấu hình inference hoặc được tạo từ dataset/evaluator khác; model chưa có kết quả được ghi rõ là đang chờ và không tham gia biểu đồ so sánh. Không được chép metric từ log train, cache evaluator cũ hoặc bộ so khớp riêng vào bảng chung; toàn bộ metric chất lượng đều xuất phát từ `pycocotools.COCOeval`.
+Mỗi `result_<model>.json` chứa protocol `common-coco-v7-640-b1`, `protocol_id`, SHA-256 của annotation test và checkpoint, phiên bản thư viện, kích thước inference 640, batch size 1, cấu hình ngưỡng, hậu xử lý, NMS và ánh xạ lớp. Lệnh merge chấp nhận kết quả của các model được đánh giá ở những lượt khác nhau nhưng từ chối file sai protocol, sai kích thước, sai batch, sai cấu hình inference hoặc được tạo từ dataset/evaluator khác; model chưa có kết quả được ghi rõ là đang chờ và không tham gia biểu đồ so sánh. Không được chép metric từ log train, cache evaluator cũ hoặc bộ so khớp riêng vào bảng chung; toàn bộ metric chất lượng đều xuất phát từ `pycocotools.COCOeval`.
