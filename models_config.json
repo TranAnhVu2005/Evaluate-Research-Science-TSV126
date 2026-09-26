@@ -15,10 +15,10 @@
     "dummy_category_name": "19-8-BoSungAnhChoCacLopBiTh-v3zo"
   },
   "benchmark_settings": {
-    "protocol_name": "common-coco-v4-640-b1",
+    "protocol_name": "common-coco-v5-640-b1",
     "imgsz": 640,
     "expected_num_models": 8,
-    "conf_threshold": 0.001,
+    "conf_threshold": 0.0,
     "operating_conf_threshold": 0.25,
     "iou_threshold": 0.50,
     "max_detections": 100,
@@ -71,11 +71,11 @@
       "label_offset": 1,
       "imgsz": 640,
       "constructor_kwargs": {
-        "box_nms_thresh": 0.5
+        "box_nms_thresh": 0.55
       },
-      "weights": "",
-      "local_weights": "",
-      "patience": null,
+      "weights": "/models/FasterRCNN_MobileNetv3Large/best_mobilenet_fasterrcnn.pth",
+      "local_weights": "models/FasterRCNN_MobileNetv3Large/best_mobilenet_fasterrcnn.pth",
+      "patience": 15,
       "enabled": false
     },
     "FCOS_ResNet50_FPN": {
@@ -126,7 +126,7 @@
       "weights": "/models/RFDETR_Medium/best.pth",
       "local_weights": "models/RFDETR_Medium/best.pth",
       "patience": 10,
-      "enabled": true
+      "enabled": false
     },
     "RTDETR_L": {
       "display_name": "RTDETR-L",
@@ -136,7 +136,7 @@
       "weights": "/models/RTDETR_L/best.pt",
       "local_weights": "models/RTDETR_L/best.pt",
       "patience": 10,
-      "enabled": true
+      "enabled": false
     }
   }
 }

@@ -19,7 +19,7 @@ import modal
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(CURRENT_DIR, "models_config.json")
-PROTOCOL_NAME = "common-coco-v4-640-b1"
+PROTOCOL_NAME = "common-coco-v5-640-b1"
 REQUIRED_MODEL_KEYS = {
     "YOLOv26X",
     "FasterRCNN_ResNet50",
@@ -115,6 +115,103 @@ def compute_protocol_id(protocol: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def compute_payload_sha256(payload: Dict[str, Any]) -> str:
+    """Hash a JSON-compatible provenance payload deterministically."""
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def dataframe_to_markdown(dataframe: pd.DataFrame) -> str:
+    """Render a simple GFM table without pandas' optional tabulate dependency."""
+    def escape_cell(value: Any) -> str:
+        return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+    headers = [escape_cell(column) for column in dataframe.columns]
+    rows = [
+        [escape_cell(value) for value in row]
+        for row in dataframe.itertuples(index=False, name=None)
+    ]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    return "\n".join(lines)
+
+
+def build_requested_inference_config(
+    model_cfg: Dict[str, Any],
+    bench_cfg: Dict[str, Any],
+    evaluated_classes: List[str],
+) -> Dict[str, Any]:
+    """Return the complete model-specific inference request recorded in every result."""
+    return {
+        "family": model_cfg.get("family"),
+        "model_type": model_cfg.get("model_type"),
+        "model_class": model_cfg.get("model_class"),
+        "imgsz": int(model_cfg.get("imgsz", bench_cfg["imgsz"])),
+        "batch_size": int(bench_cfg["batch_size"]),
+        "prediction_conf_threshold": float(bench_cfg["conf_threshold"]),
+        "max_detections": int(bench_cfg["max_detections"]),
+        "label_offset": (
+            int(model_cfg["label_offset"]) if "label_offset" in model_cfg else None
+        ),
+        "nms_iou_threshold": model_cfg.get("nms_iou_threshold"),
+        "constructor_kwargs": dict(model_cfg.get("constructor_kwargs", {})),
+        "checkpoint_classes": list(
+            model_cfg.get("checkpoint_classes") or evaluated_classes
+        ),
+        "class_name_map": dict(model_cfg.get("class_name_map", {})),
+        "ignored_checkpoint_classes": list(
+            model_cfg.get("ignored_checkpoint_classes", [])
+        ),
+    }
+
+
+def build_resolved_inference_config(
+    adapter: Any,
+    requested_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Record the adapter's effective settings and resolved class/category mapping."""
+    checkpoint_classes = getattr(adapter, "checkpoint_classes", {})
+    if isinstance(checkpoint_classes, dict):
+        indexed_classes = checkpoint_classes
+    else:
+        indexed_classes = {
+            index: name for index, name in enumerate(checkpoint_classes or [])
+        }
+    resolved = {
+        "requested": requested_config,
+        "effective": {
+            "imgsz": int(getattr(adapter, "imgsz")),
+            "prediction_conf_threshold": float(getattr(adapter, "conf_thresh")),
+            "max_detections": int(getattr(adapter, "max_detections")),
+            "backend_max_detections": int(
+                getattr(adapter, "backend_max_detections", getattr(adapter, "max_detections"))
+            ),
+            "nms_iou_threshold": getattr(adapter, "nms_iou_threshold", None),
+            "constructor_kwargs": dict(
+                getattr(adapter, "effective_constructor_kwargs", {})
+            ),
+            "background_class_id": getattr(adapter, "background_class_id", None),
+        },
+        "checkpoint_classes": [
+            {"index": int(index), "name": str(name)}
+            for index, name in sorted(indexed_classes.items())
+        ],
+        "class_idx_to_category_id": {
+            str(int(index)): int(category_id)
+            for index, category_id in sorted(
+                getattr(adapter, "class_idx_to_cat_id", {}).items()
+            )
+        },
+        "ignored_class_indices": sorted(
+            int(index) for index in getattr(adapter, "ignored_class_indices", set())
+        ),
+    }
+    return resolved
+
+
 def build_protocol_metadata(
     bench_cfg: Dict[str, Any],
     annotation_sha256: str,
@@ -137,7 +234,7 @@ def build_protocol_metadata(
         "settings": {
             "inference_imgsz": int(bench_cfg.get("imgsz", 640)),
             "inference_batch_size": int(bench_cfg.get("batch_size", 1)),
-            "prediction_conf_threshold": float(bench_cfg.get("conf_threshold", 0.001)),
+            "prediction_conf_threshold": float(bench_cfg.get("conf_threshold", 0.0)),
             "operating_conf_threshold": float(bench_cfg.get("operating_conf_threshold", 0.25)),
             "operating_iou_threshold": float(bench_cfg.get("iou_threshold", 0.50)),
             "operating_metric_source": "pycocotools.COCOeval.evalImgs",
@@ -182,7 +279,7 @@ def validate_configuration(config_data: Dict[str, Any]) -> None:
     if expected_models != len(REQUIRED_MODEL_KEYS):
         raise ValueError("benchmark_settings.expected_num_models must be 8")
     locked_settings = {
-        "conf_threshold": 0.001,
+        "conf_threshold": 0.0,
         "operating_conf_threshold": 0.25,
         "iou_threshold": 0.50,
         "max_detections": 100,
@@ -237,6 +334,25 @@ def validate_configuration(config_data: Dict[str, Any]) -> None:
             raise ValueError(f"{model_key}.checkpoint_classes contains duplicates")
         if family == "rfdetr" and not model_cfg.get("model_class"):
             raise ValueError(f"{model_key}.model_class is required for RF-DETR")
+        if family == "torchvision" and int(model_cfg.get("label_offset", -1)) != 1:
+            raise ValueError(f"{model_key}.label_offset must be 1 for Torchvision detectors")
+        if family == "rfdetr" and int(model_cfg.get("label_offset", -1)) != 0:
+            raise ValueError(f"{model_key}.label_offset must be 0 for RF-DETR")
+        constructor_kwargs = set(model_cfg.get("constructor_kwargs", {}))
+        protocol_controlled_kwargs = {
+            "min_size",
+            "max_size",
+            "box_score_thresh",
+            "score_thresh",
+            "box_detections_per_img",
+            "detections_per_img",
+        }
+        forbidden_kwargs = sorted(constructor_kwargs & protocol_controlled_kwargs)
+        if forbidden_kwargs:
+            raise ValueError(
+                f"{model_key}.constructor_kwargs cannot override protocol-controlled settings: "
+                f"{forbidden_kwargs}"
+            )
         if not isinstance(model_cfg.get("enabled"), bool):
             raise ValueError(f"{model_key}.enabled must be true or false")
         model_imgsz = int(model_cfg.get("imgsz", required_imgsz))
@@ -548,7 +664,7 @@ def normalize_coco_detection(
     ymax = max(0.0, min(float(image_height), float(box_xyxy[3])))
     width = xmax - xmin
     height = ymax - ymin
-    if width <= 1.0 or height <= 1.0:
+    if width <= 0.0 or height <= 0.0:
         return None
     return {
         "bbox": [xmin, ymin, width, height],
@@ -565,7 +681,7 @@ class UltralyticsAdapter:
         weights_path: str,
         name_to_cat_id: Dict[str, int],
         device: str = "cuda:0",
-        conf_thresh: float = 0.001,
+        conf_thresh: float = 0.0,
         imgsz: int = 640,
         max_detections: int = 100,
     ):
@@ -590,8 +706,14 @@ class UltralyticsAdapter:
             checkpoint_names = {i: str(name) for i, name in enumerate(checkpoint_names)}
         else:
             checkpoint_names = {int(index): str(name) for index, name in checkpoint_names.items()}
+        self.checkpoint_classes = checkpoint_names
         self.class_idx_to_cat_id, self.ignored_class_indices = build_class_mapping(
             checkpoint_names, name_to_cat_id, model_cfg, "Ultralytics"
+        )
+        self.backend_max_detections = (
+            max(self.max_detections, 300)
+            if self.ignored_class_indices
+            else self.max_detections
         )
 
     def predict_image(self, image_bgr: np.ndarray, orig_w: int, orig_h: int) -> List[Dict[str, Any]]:
@@ -601,7 +723,7 @@ class UltralyticsAdapter:
             "imgsz": self.imgsz,
             "device": self.device,
             "verbose": False,
-            "max_det": self.max_detections,
+            "max_det": self.backend_max_detections,
         }
         if self.nms_iou_threshold is not None:
             predict_kwargs["iou"] = float(self.nms_iou_threshold)
@@ -623,7 +745,8 @@ class UltralyticsAdapter:
                 )
                 if detection is not None:
                     detections.append(detection)
-        return detections
+        detections.sort(key=lambda detection: detection["score"], reverse=True)
+        return detections[: self.max_detections]
 
     def get_torch_module(self):
         return self.model.model
@@ -638,7 +761,7 @@ class TorchvisionAdapter:
         class_names: List[str],
         name_to_cat_id: Dict[str, int],
         device: str = "cuda:0",
-        conf_thresh: float = 0.001,
+        conf_thresh: float = 0.0,
         imgsz: int = 640,
         max_detections: int = 100,
     ):
@@ -663,13 +786,31 @@ class TorchvisionAdapter:
         self.class_idx_to_cat_id, self.ignored_class_indices = build_class_mapping(
             indexed_names, name_to_cat_id, model_cfg, "Torchvision"
         )
+        self.backend_max_detections = (
+            max(self.max_detections, 300)
+            if self.ignored_class_indices
+            else self.max_detections
+        )
         num_model_classes = len(self.checkpoint_classes) + self.label_offset
         model_type = str(model_cfg["model_type"])
         kwargs = dict(model_cfg.get("constructor_kwargs", {}))
-        kwargs.setdefault("min_size", int(imgsz))
-        kwargs.setdefault("max_size", int(imgsz))
+        kwargs["min_size"] = int(imgsz)
+        kwargs["max_size"] = int(imgsz)
 
         ckpt = torch.load(weights_path, map_location=self.device)
+        embedded_classes = ckpt.get("class_names") if isinstance(ckpt, dict) else None
+        if embedded_classes is not None:
+            embedded_classes = [str(name) for name in embedded_classes]
+            if embedded_classes != list(self.checkpoint_classes):
+                raise ValueError(
+                    "Torchvision checkpoint class order does not match checkpoint_classes: "
+                    f"checkpoint={embedded_classes}, configured={list(self.checkpoint_classes)}"
+                )
+        elif not model_cfg.get("checkpoint_classes"):
+            raise ValueError(
+                "Torchvision checkpoint does not contain class_names. Configure checkpoint_classes "
+                "explicitly so class order can be verified before COCO evaluation."
+            )
         if hasattr(ckpt, "state_dict"):
             state_dict = ckpt.state_dict()
         elif isinstance(ckpt, dict):
@@ -690,8 +831,8 @@ class TorchvisionAdapter:
                 state_dict = {str(key)[len(prefix):]: value for key, value in state_dict.items()}
 
         if model_type in {"fasterrcnn_resnet50_fpn", "fasterrcnn_resnet50_fpn_v2"}:
-            kwargs.setdefault("box_score_thresh", float(conf_thresh))
-            kwargs.setdefault("box_detections_per_img", int(max_detections))
+            kwargs["box_score_thresh"] = float(conf_thresh)
+            kwargs["box_detections_per_img"] = int(self.backend_max_detections)
             constructor = (
                 fasterrcnn_resnet50_fpn_v2
                 if model_type.endswith("_v2")
@@ -709,18 +850,18 @@ class TorchvisionAdapter:
                 if model_type.endswith("_320_fpn")
                 else fasterrcnn_mobilenet_v3_large_fpn
             )
-            kwargs.setdefault("box_score_thresh", float(conf_thresh))
-            kwargs.setdefault("box_detections_per_img", int(max_detections))
+            kwargs["box_score_thresh"] = float(conf_thresh)
+            kwargs["box_detections_per_img"] = int(self.backend_max_detections)
             self.model = constructor(weights=None, weights_backbone=None, num_classes=num_model_classes, **kwargs)
         elif model_type == "fcos_resnet50_fpn":
-            kwargs.setdefault("score_thresh", float(conf_thresh))
-            kwargs.setdefault("detections_per_img", int(max_detections))
+            kwargs["score_thresh"] = float(conf_thresh)
+            kwargs["detections_per_img"] = int(self.backend_max_detections)
             self.model = fcos_resnet50_fpn(
                 weights=None, weights_backbone=None, num_classes=num_model_classes, **kwargs
             )
         elif model_type in {"retinanet_resnet50_fpn", "retinanet_resnet50_fpn_v2"}:
-            kwargs.setdefault("score_thresh", float(conf_thresh))
-            kwargs.setdefault("detections_per_img", int(max_detections))
+            kwargs["score_thresh"] = float(conf_thresh)
+            kwargs["detections_per_img"] = int(self.backend_max_detections)
             constructor = (
                 retinanet_resnet50_fpn_v2
                 if model_type.endswith("_v2")
@@ -731,6 +872,8 @@ class TorchvisionAdapter:
             )
         else:
             raise ValueError(f"Không hỗ trợ kiến trúc Torchvision: {model_type}")
+
+        self.effective_constructor_kwargs = dict(kwargs)
 
         try:
             self.model.load_state_dict(state_dict, strict=True)
@@ -759,7 +902,7 @@ class TorchvisionAdapter:
         scores = output["scores"].cpu().numpy()
         labels = output["labels"].cpu().numpy()
 
-        order = np.argsort(-scores)[: self.max_detections]
+        order = np.argsort(-scores, kind="stable")
         for box, score, label in zip(boxes[order], scores[order], labels[order]):
             lbl = int(label)
             cls_idx = lbl - self.label_offset
@@ -780,6 +923,8 @@ class TorchvisionAdapter:
             )
             if detection is not None:
                 detections.append(detection)
+                if len(detections) == self.max_detections:
+                    break
         return detections
 
     def get_torch_module(self):
@@ -795,7 +940,7 @@ class RFDETRAdapter:
         class_names: List[str],
         name_to_cat_id: Dict[str, int],
         device: str = "cuda:0",
-        conf_thresh: float = 0.001,
+        conf_thresh: float = 0.0,
         imgsz: int = 640,
         max_detections: int = 100,
     ):
@@ -822,6 +967,25 @@ class RFDETRAdapter:
             device=device,
             resolution=int(imgsz),
         )
+        model_context = getattr(self.model, "model", None)
+        embedded_classes = getattr(model_context, "class_names", None)
+        if embedded_classes is not None and list(embedded_classes) != list(self.checkpoint_classes):
+            raise ValueError(
+                "RF-DETR checkpoint class order does not match checkpoint_classes: "
+                f"checkpoint={list(embedded_classes)}, configured={list(self.checkpoint_classes)}"
+            )
+        model_args = getattr(model_context, "args", None)
+        self.background_class_id = int(
+            getattr(model_args, "num_classes", len(self.checkpoint_classes))
+        )
+        self.backend_max_detections = int(
+            getattr(model_args, "num_select", max(self.max_detections, 300))
+        )
+        if self.background_class_id != len(self.checkpoint_classes):
+            raise ValueError(
+                "RF-DETR checkpoint class count does not match checkpoint_classes: "
+                f"checkpoint={self.background_class_id}, configured={len(self.checkpoint_classes)}"
+            )
         self.imgsz = int(getattr(getattr(self.model, "model_config", None), "resolution", imgsz))
         if self.imgsz != int(imgsz):
             raise RuntimeError(
@@ -839,7 +1003,26 @@ class RFDETRAdapter:
         boxes = np.asarray(output.xyxy)
         scores = np.asarray(output.confidence)
         labels = np.asarray(output.class_id).astype(int)
-        order = np.argsort(-scores)[: self.max_detections]
+        # RF-DETR exposes its final no-object logit as class_id == num_classes.
+        # Remove it before max_detections so a background row never consumes one
+        # of the 100 COCO detection slots.
+        foreground = labels != self.background_class_id
+        class_indices = labels - self.label_offset
+        invalid_foreground = foreground & (
+            (class_indices < 0) | (class_indices >= len(self.checkpoint_classes))
+        )
+        if np.any(invalid_foreground):
+            invalid_labels = sorted(int(label) for label in np.unique(labels[invalid_foreground]))
+            raise ValueError(
+                f"RF-DETR labels {invalid_labels} are outside configured checkpoint classes"
+            )
+        ignored = np.isin(class_indices, list(self.ignored_class_indices))
+        candidates = np.flatnonzero(
+            foreground & ~ignored & (scores >= self.conf_thresh)
+        )
+        order = candidates[np.argsort(-scores[candidates], kind="stable")][
+            : self.max_detections
+        ]
         detections = []
         for box, score, raw_label in zip(boxes[order], scores[order], labels[order]):
             cls_idx = int(raw_label) - self.label_offset
@@ -857,7 +1040,20 @@ class RFDETRAdapter:
         return detections
 
     def get_torch_module(self):
-        return self.model.model if hasattr(self.model, "model") else self.model
+        import torch
+
+        # RF-DETR wraps the actual nn.Module twice:
+        # RFDETR -> ModelContext -> LWDETR.  Returning ModelContext here breaks
+        # the shared complexity benchmark because it does not implement eval(),
+        # to(), parameters(), or modules().
+        candidate = self.model
+        for _ in range(3):
+            if isinstance(candidate, torch.nn.Module):
+                return candidate
+            candidate = getattr(candidate, "model", None)
+            if candidate is None:
+                break
+        raise TypeError("RF-DETR did not expose an underlying torch.nn.Module")
 
 
 # ==============================================================================
@@ -1106,7 +1302,9 @@ class COCOBenchmarkEvaluator:
 
         per_class_metrics = {}
         for idx_k, cat_id in enumerate(coco_eval.params.catIds):
-            cat_name = coco_gt.loadCats(cat_id)[0]["name"]
+            # COCOeval may normalize catIds to NumPy integer scalars.  COCO.loadCats
+            # only handles Python int (or an iterable), so normalize explicitly.
+            cat_name = coco_gt.loadCats(int(cat_id))[0]["name"]
             p_all = coco_eval.eval["precision"][:, :, idx_k, 0, 2]
             v_all = p_all[p_all > -1]
             cls_map50_95 = float(np.mean(v_all)) if len(v_all) > 0 else 0.0
@@ -1217,7 +1415,7 @@ class ScientificReportVisualizer:
                 )
             else:
                 f.write("- **Chuẩn đánh giá**: chưa có kết quả hoàn tất để xác định protocol.\n\n")
-            f.write(summary_df.to_markdown(index=False))
+            f.write(dataframe_to_markdown(summary_df))
             f.write("\n\n*Ghi chú: Không đồng nhất Precision/Recall tại một ngưỡng cố định với COCO AP/AR tích phân.*\n")
 
         # 3. BẢNG ĐỐI CHIẾU CHÉO 32 LỚP NGUYÊN LIỆU
@@ -1336,7 +1534,7 @@ def execute_common_coco_evaluation(
 
     bench_cfg = config_data.get("benchmark_settings", {})
     img_size = int(bench_cfg.get("imgsz", 640))
-    conf_thresh = float(bench_cfg.get("conf_threshold", 0.001))
+    conf_thresh = float(bench_cfg.get("conf_threshold", 0.0))
     operating_conf_thresh = float(bench_cfg.get("operating_conf_threshold", 0.25))
     operating_iou_thresh = float(bench_cfg.get("iou_threshold", 0.50))
     max_detections = int(bench_cfg.get("max_detections", 100))
@@ -1508,6 +1706,12 @@ def execute_common_coco_evaluation(
                 f"{m_key} must run at the common imgsz={img_size}, but its adapter reports "
                 f"effective resolution={effective_img_size}."
             )
+        requested_inference_config = build_requested_inference_config(
+            m_cfg, bench_cfg, class_names
+        )
+        resolved_inference_config = build_resolved_inference_config(
+            adapter, requested_inference_config
+        )
 
         # 1. Đo GFLOPs và Parameters
         print("  [BENCHMARK] Đo GFLOPs và Parameters...")
@@ -1610,6 +1814,10 @@ def execute_common_coco_evaluation(
                 "inference_imgsz": effective_img_size,
                 "inference_batch_size": batch_size,
                 "device": device,
+                "inference_config": resolved_inference_config,
+                "inference_config_sha256": compute_payload_sha256(
+                    resolved_inference_config
+                ),
             },
             "operating_point": eval_metrics["operating_point"],
             "per_class": per_class_combined,
@@ -1745,6 +1953,31 @@ def merge_team_results(results_dir: str, output_dir: Optional[str] = None):
                         char not in "0123456789abcdef" for char in checkpoint_hash.lower()
                     ):
                         raise ValueError("model_provenance.checkpoint_sha256 is invalid")
+                    inference_config = provenance.get("inference_config")
+                    if not isinstance(inference_config, dict):
+                        raise ValueError("model_provenance.inference_config is missing")
+                    inference_config_hash = str(
+                        provenance.get("inference_config_sha256", "")
+                    )
+                    if inference_config_hash != compute_payload_sha256(inference_config):
+                        raise ValueError(
+                            "model_provenance.inference_config_sha256 does not match its payload"
+                        )
+                    expected_model_inference_cfg = dict(expected_model_cfg)
+                    expected_model_inference_cfg.setdefault(
+                        "ignored_checkpoint_classes",
+                        config_data.get("ignored_checkpoint_classes", []),
+                    )
+                    expected_requested_config = build_requested_inference_config(
+                        expected_model_inference_cfg,
+                        bench_cfg,
+                        config_data["classes"],
+                    )
+                    if inference_config.get("requested") != expected_requested_config:
+                        raise ValueError(
+                            "model_provenance.inference_config.requested does not match "
+                            f"the current {m_key} configuration"
+                        )
                     if m_key in collected_results:
                         raise ValueError(f"Duplicate result for model_key '{m_key}'")
                     protocol_ids.add(protocol_id)

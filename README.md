@@ -127,7 +127,7 @@ Các trường cấu hình quan trọng cho từng framework:
 - `model_class`: class RF-DETR chính thức, ví dụ `RFDETRMedium`.
 - `imgsz`: bắt buộc là `640` cho cả 8 mô hình. RF-DETR Medium được nạp với resolution override 640; checkpoint phải tương thích với API RF-DETR đang được pin.
 - `label_offset`: thường là `1` cho Torchvision và `0` cho RF-DETR/Ultralytics.
-- `checkpoint_classes`: chỉ cần khai báo khi thứ tự/số lớp trong checkpoint khác danh sách `classes` chung.
+- `checkpoint_classes`: khai báo khi thứ tự/số lớp khác danh sách `classes` chung; với checkpoint Torchvision không chứa metadata `class_names`, trường này là bắt buộc để hệ thống không phải đoán thứ tự lớp.
 - `class_name_map` và `ignored_checkpoint_classes`: ánh xạ bí danh hoặc bỏ lớp rác một cách tường minh. Pipeline không tự đoán class ID.
 
 ### Bước 3: Chạy đánh giá
@@ -195,10 +195,10 @@ Tập dữ liệu bao gồm 32 lớp nguyên liệu thực phẩm đặc trưng:
 Khi so sánh các mô hình thuộc framework Ultralytics (YOLOv26X, YOLOv11, RT-DETR) với Torchvision (Faster R-CNN, FCOS, RetinaNet), tính nhất quán của benchmark được đảm bảo nhờ:
 1. **Trọng tài độc lập duy nhất**: Không sử dụng hàm tính mAP nội bộ của từng thư viện mà toàn bộ dự đoán được đưa vào đối tượng chuẩn quốc tế `pycocotools.cocoeval.COCOeval`.
 2. **Quy đổi kích thước chuẩn xác**: Tọa độ bounding box dự đoán của mọi mô hình đều được ánh xạ ngược về kích thước pixel gốc của ảnh test $(orig\_w, orig\_h)$.
-3. **Đồng nhất ngưỡng Confidence**: Cả 3 họ adapter đều thiết lập `conf_threshold = 0.001` để xuất dải điểm số cho `COCOeval`; Precision/Recall/F1 được suy ra trực tiếp từ `COCOeval.evalImgs` tại `operating_conf_threshold`, có áp dụng cùng quy tắc match, ignore và crowd của COCO.
+3. **Không cắt dự đoán theo confidence trước COCOeval**: Cả 3 họ adapter đều thiết lập `conf_threshold = 0.0`; mỗi model xuất tối đa 100 dự đoán theo điểm số và `COCOeval` thực hiện đánh giá/xếp hạng. Cách này tránh thiên lệch do các model hiệu chỉnh confidence khác nhau. Precision/Recall/F1 được suy ra trực tiếp từ `COCOeval.evalImgs` tại `operating_conf_threshold`, có áp dụng cùng quy tắc match, ignore và crowd của COCO.
 4. **Môi trường phần cứng chuẩn hóa**: Đo đạc độ trễ trên cùng GPU NVIDIA A100 (Modal Cloud) với `batch_size = 1`, cơ chế đồng bộ `torch.cuda.synchronize()` và loại bỏ độ trễ khởi động kernel bằng bước warm-up.
 5. **Khóa giao thức đầu vào**: Cả 8 model bắt buộc inference ở `imgsz = 640`, `batch_size = 1`; ảnh test phải đúng 640 × 640 và merge kiểm tra lại các giá trị này trong cả protocol lẫn provenance.
 
 NMS và hậu xử lý tạo prediction vẫn thuộc implementation chuẩn của từng kiến trúc; `COCOeval` thống nhất cách chấm các prediction đó, không thay thế hậu xử lý nội tại của model.
 
-Mỗi `result_<model>.json` chứa protocol `common-coco-v4-640-b1`, `protocol_id`, SHA-256 của annotation test và checkpoint, phiên bản thư viện, kích thước inference 640, batch size 1, cấu hình ngưỡng và danh sách lớp. Lệnh merge chấp nhận kết quả của các model được đánh giá ở những lượt khác nhau nhưng từ chối file sai protocol, sai kích thước, sai batch hoặc được tạo từ dataset/evaluator khác; model chưa có kết quả được ghi rõ là đang chờ và không tham gia biểu đồ so sánh. Không được chép metric từ log train, cache evaluator cũ hoặc bộ so khớp riêng vào bảng chung; toàn bộ metric chất lượng đều xuất phát từ `pycocotools.COCOeval`.
+Mỗi `result_<model>.json` chứa protocol `common-coco-v5-640-b1`, `protocol_id`, SHA-256 của annotation test và checkpoint, phiên bản thư viện, kích thước inference 640, batch size 1, cấu hình ngưỡng, hậu xử lý, NMS và ánh xạ lớp. Lệnh merge chấp nhận kết quả của các model được đánh giá ở những lượt khác nhau nhưng từ chối file sai protocol, sai kích thước, sai batch, sai cấu hình inference hoặc được tạo từ dataset/evaluator khác; model chưa có kết quả được ghi rõ là đang chờ và không tham gia biểu đồ so sánh. Không được chép metric từ log train, cache evaluator cũ hoặc bộ so khớp riêng vào bảng chung; toàn bộ metric chất lượng đều xuất phát từ `pycocotools.COCOeval`.
