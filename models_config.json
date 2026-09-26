@@ -15,11 +15,11 @@
     "dummy_category_name": "19-8-BoSungAnhChoCacLopBiTh-v3zo"
   },
   "benchmark_settings": {
-    "protocol_name": "common-coco-v5-640-b1",
+    "protocol_name": "common-coco-v7-640-b1",
     "imgsz": 640,
     "expected_num_models": 8,
     "conf_threshold": 0.0,
-    "operating_conf_threshold": 0.25,
+    "operating_conf_threshold": 0.55,
     "iou_threshold": 0.50,
     "max_detections": 100,
     "expected_num_classes": 32,
@@ -30,11 +30,38 @@
     "local_output_dir": "Results"
   },
   "classes": [
-    "beef", "bellpepper", "bittergourd", "bottlegourd", "broccoli", "cabbage",
-    "carrot", "cauliflower", "chayote", "chicken", "chickenegg", "chickenleg",
-    "chickenwin", "corn", "cucumber", "duckegg", "eggplant", "garlic", "ginger",
-    "jicama", "okra", "onion", "pork", "potato", "pumpkin", "radish", "scallion",
-    "shrimp", "spongegourd", "sweetpotato", "tofu", "tomato"
+    "beef",
+    "bellpepper",
+    "bittergourd",
+    "bottlegourd",
+    "broccoli",
+    "cabbage",
+    "carrot",
+    "cauliflower",
+    "chayote",
+    "chicken",
+    "chickenegg",
+    "chickenleg",
+    "chickenwin",
+    "corn",
+    "cucumber",
+    "duckegg",
+    "eggplant",
+    "garlic",
+    "ginger",
+    "jicama",
+    "okra",
+    "onion",
+    "pork",
+    "potato",
+    "pumpkin",
+    "radish",
+    "scallion",
+    "shrimp",
+    "spongegourd",
+    "sweetpotato",
+    "tofu",
+    "tomato"
   ],
   "ignored_checkpoint_classes": [
     "19-8-BoSungAnhChoCacLopBiTh-v3zo"
@@ -76,7 +103,7 @@
       "weights": "/models/FasterRCNN_MobileNetv3Large/best_mobilenet_fasterrcnn.pth",
       "local_weights": "models/FasterRCNN_MobileNetv3Large/best_mobilenet_fasterrcnn.pth",
       "patience": 15,
-      "enabled": false
+      "enabled": true
     },
     "FCOS_ResNet50_FPN": {
       "display_name": "FCOS + ResNet50-FPN",
@@ -87,10 +114,10 @@
       "constructor_kwargs": {
         "nms_thresh": 0.55
       },
-      "weights": "",
-      "local_weights": "",
+      "weights": "/models/FCOS_ResNet50_FPN/best_fcos.pth",
+      "local_weights": "models/FCOS_ResNet50_FPN/best_fcos.pth",
       "patience": null,
-      "enabled": false
+      "enabled": true
     },
     "YOLOv11": {
       "display_name": "YOLOv11",
