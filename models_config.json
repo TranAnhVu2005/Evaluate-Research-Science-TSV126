@@ -1,6 +1,6 @@
 {
   "modal_settings": {
-    "volume_name": "volume-10-09-2026-yolo26x-640",
+    "volume_name": "volume-10-09-2026-fasterrcnn-640",
     "app_name": "app-common-coco-evaluate",
     "gpu": "A100",
     "timeout_seconds": 7200,
@@ -59,6 +59,13 @@
       "constructor_kwargs": {
         "box_nms_thresh": 0.5
       },
+      "checkpoint_classes": [
+        "beef", "bellpepper", "bittergourd", "bottlegourd", "broccoli", "cabbage",
+        "carrot", "cauliflower", "chayote", "chicken", "chickenegg", "chickenleg",
+        "chickenwin", "corn", "cucumber", "duckegg", "eggplant", "garlic", "ginger",
+        "jicama", "okra", "onion", "pork", "potato", "pumpkin", "radish", "scallion",
+        "shrimp", "spongegourd", "sweetpotato", "tofu", "tomato"
+      ],
       "weights": "/data/runs/10_09_2026_FasterRCNN_ResNet50_640/best.pth",
       "local_weights": "FasterRCNN/10_09_2026/best.pth",
       "patience": 10,
